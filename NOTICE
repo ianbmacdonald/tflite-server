@@ -1,0 +1,15 @@
+tflite-server
+Copyright 2026 Ian MacDonald
+
+This product is derived from ort-server (https://github.com/lemonade-sdk/ort-server),
+licensed under the Apache License, Version 2.0. The /classify contract, manifest
+handling, tokenizer handling and model-family allowlist in src/main.cpp come from
+ort-server's src/main.cpp; the inference engine was changed from ONNX Runtime to
+LiteRT. tools/export_tflite.py follows the export.py shipped in the lemonade-sdk
+*-ONNX classifier repositories.
+
+It links:
+- LiteRT (https://github.com/google-ai-edge/LiteRT), Apache License 2.0
+- HuggingFace tokenizers via mlc-ai/tokenizers-cpp, Apache License 2.0
+- cpp-httplib, MIT License
+- nlohmann/json, MIT License
