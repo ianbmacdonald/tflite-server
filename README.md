@@ -60,6 +60,18 @@ two cores of a Ryzen AI Max+ 395:
 | tflite-server, 4 signatures, no cache | 888 MiB | 693 MiB | 15-18 ms | |
 | tflite-server, 4 signatures, `--weight-cache` | 230-239 MiB | 35-44 MiB | 14-17 ms | 91 ms |
 
+**Quantization, measured on the same model.** `tools/quantize_tflite.py` applies an ai-edge-quantizer
+recipe and re-validates against PyTorch:
+
+| recipe | model.tflite | max score delta | same top label | tflite-server RSS / anonymous |
+|---|---|---|---|---|
+| fp32 (no quantization) | 270 MB | 1.2e-9 | 12/12 | 238 / 44 MiB (`--weight-cache`) |
+| `weight_only_wi8_afp32` | 74 MB | 0.029 | 24/24 | 1225 / 972 MiB |
+| `dynamic_wi8_afp32` (and per-channel) | 74 MB | 0.36 | 20/24 | not used: changes answers |
+
+Weight-only int8 saves disk, but LiteRT expands the weights to fp32 in memory, so it costs RAM. On a
+host where RAM is the constraint, serve the fp32 model with `--weight-cache`.
+
 Scores match ort-server to within 1.94e-6 on 8 texts, including one truncated at 512 tokens, with the
 same top label on all of them (`tools/compare_with_ort.py`).
 
