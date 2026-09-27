@@ -45,6 +45,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -68,6 +69,8 @@ struct Manifest {
 struct Args {
     std::string model_path;
     int port = 0;
+    int threads = 0;  // 0: one per hardware thread
+    std::string weight_cache;  // XNNPACK packed-weight cache file; empty = in memory
     bool verbose = false;
 };
 
@@ -77,10 +80,12 @@ Args parse_args(int argc, char** argv) {
         std::string f = argv[i];
         if (f == "--model-path" && i + 1 < argc) a.model_path = argv[++i];
         else if (f == "--port" && i + 1 < argc) a.port = std::stoi(argv[++i]);
+        else if (f == "--threads" && i + 1 < argc) a.threads = std::stoi(argv[++i]);
+        else if (f == "--weight-cache" && i + 1 < argc) a.weight_cache = argv[++i];
         else if (f == "--verbose") a.verbose = true;
     }
     if (a.model_path.empty() || a.port == 0) {
-        throw std::runtime_error("usage: tflite-server --model-path <dir> --port <n> [--verbose]");
+        throw std::runtime_error("usage: tflite-server --model-path <dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]");
     }
     return a;
 }
@@ -374,7 +379,8 @@ void collect_inserted_special_ids(const json& pp, std::set<int64_t>& out) {
 
 class Model {
 public:
-    Model(const fs::path& dir, bool verbose) : manifest_(load_manifest(dir)) {
+    Model(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
+        : manifest_(load_manifest(dir)) {
         (void)verbose;
         std::string blob = load_bytes(dir / "tokenizer.json");
 
@@ -426,6 +432,17 @@ public:
         auto options = litert::Options::Create();
         if (!options) throw std::runtime_error("LiteRT options: " + options.Error().Message());
         options->SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+        if (threads <= 0) threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        auto cpu = options->GetCpuOptions();
+        if (!cpu || !cpu->SetNumThreads(threads)) {
+            throw std::runtime_error("cannot set the LiteRT CPU thread count");
+        }
+        // Without a cache file XNNPACK packs the weights into anonymous memory
+        // once per signature. A cache file holds one packed copy, mapped from
+        // disk and shared by every signature.
+        if (!weight_cache.empty() && !cpu->SetXNNPackWeightCachePath(weight_cache.c_str())) {
+            throw std::runtime_error("cannot set the XNNPACK weight cache path");
+        }
         auto compiled = litert::CompiledModel::Create(*env_, (dir / "model.tflite").string(), *options);
         if (!compiled) {
             throw std::runtime_error("cannot load model.tflite from " + dir.string() + ": " +
@@ -433,31 +450,48 @@ public:
         }
         model_ = std::make_unique<litert::CompiledModel>(std::move(*compiled));
 
-        auto names = model_->GetSignatureInputNames();
-        if (!names) throw std::runtime_error("model.tflite has no readable signature inputs");
-        for (const auto& n : *names) input_names_.emplace_back(n.data(), n.size());
-        auto inputs = model_->CreateInputBuffers();
-        auto outputs = model_->CreateOutputBuffers();
-        if (!inputs || !outputs || outputs->empty()) {
-            throw std::runtime_error("cannot allocate LiteRT input/output buffers");
+        // Each signature is the same graph at one fixed sequence length (the
+        // exporter writes seq_64, seq_128, ...). A request runs on the smallest
+        // one that holds it, so short inputs don't pay for the longest length.
+        auto keys = model_->GetSignatureKeys();
+        if (!keys || keys->empty()) throw std::runtime_error("model.tflite has no signatures");
+        for (size_t si = 0; si < keys->size(); ++si) {
+            Signature sig;
+            sig.index = si;
+            auto names = model_->GetSignatureInputNames(si);
+            if (!names) throw std::runtime_error("model.tflite has no readable signature inputs");
+            for (const auto& n : *names) sig.input_names.emplace_back(n.data(), n.size());
+            auto inputs = model_->CreateInputBuffers(si);
+            auto outputs = model_->CreateOutputBuffers(si);
+            if (!inputs || !outputs || outputs->empty()) {
+                throw std::runtime_error("cannot allocate LiteRT input/output buffers");
+            }
+            sig.inputs = std::move(*inputs);
+            sig.outputs = std::move(*outputs);
+            auto t = sig.inputs.at(0).TensorType();
+            if (!t) throw std::runtime_error("cannot read the model's input tensor type");
+            auto dims = t->Layout().Dimensions();
+            if (dims.size() != 2 || dims[0] != 1 || dims[1] < 2) {
+                throw std::runtime_error("model inputs must be [1, seq_len]");
+            }
+            sig.len = static_cast<size_t>(dims[1]);
+            auto ot = sig.outputs.at(0).TensorType();
+            if (!ot) throw std::runtime_error("cannot read the model's output tensor type");
+            for (auto d : ot->Layout().Dimensions()) sig.out_shape.push_back(d);
+            signatures_.push_back(std::move(sig));
         }
-        inputs_ = std::move(*inputs);
-        outputs_ = std::move(*outputs);
-
-        // The export fixes the sequence length; every input shares it.
-        auto t = inputs_.at(0).TensorType();
-        if (!t) throw std::runtime_error("cannot read the model's input tensor type");
-        auto dims = t->Layout().Dimensions();
-        if (dims.size() != 2 || dims[0] != 1 || dims[1] < 2) {
-            throw std::runtime_error("model inputs must be [1, seq_len]");
+        std::sort(signatures_.begin(), signatures_.end(),
+                  [](const Signature& a, const Signature& b) { return a.len < b.len; });
+        const size_t longest = signatures_.back().len;
+        if (static_cast<size_t>(manifest_.max_length) > longest) {
+            manifest_.max_length = static_cast<int>(longest);
         }
-        fixed_len_ = static_cast<size_t>(dims[1]);
-        if (static_cast<size_t>(manifest_.max_length) > fixed_len_) {
-            manifest_.max_length = static_cast<int>(fixed_len_);
+        if (verbose) {
+            std::string lens;
+            for (const auto& sig : signatures_) lens += (lens.empty() ? "" : ",") + std::to_string(sig.len);
+            fprintf(stderr, "tflite-server: %zu signature(s), lengths %s, %d thread(s)\n",
+                    signatures_.size(), lens.c_str(), threads);
         }
-        auto ot = outputs_.at(0).TensorType();
-        if (!ot) throw std::runtime_error("cannot read the model's output tensor type");
-        for (auto d : ot->Layout().Dimensions()) out_shape_.push_back(d);
     }
 
     ~Model() {
@@ -503,8 +537,13 @@ public:
         // Standard encoder inputs, padded to the export's fixed length: real
         // positions get mask 1, padding gets mask 0 (and the pad id, or 0).
         (void)seq_len;
+        Signature* sig = &signatures_.back();
+        for (auto& candidate : signatures_) {
+            if (candidate.len >= input_ids.size()) { sig = &candidate; break; }
+        }
+        const size_t fixed_len = sig->len;
         const int32_t pad = pad_id_ >= 0 ? static_cast<int32_t>(pad_id_) : 0;
-        std::vector<int32_t> ids32(fixed_len_, pad), mask32(fixed_len_, 0), types32(fixed_len_, 0);
+        std::vector<int32_t> ids32(fixed_len, pad), mask32(fixed_len, 0), types32(fixed_len, 0);
         for (size_t i = 0; i < input_ids.size(); ++i) {
             ids32[i] = static_cast<int32_t>(input_ids[i]);
             mask32[i] = 1;
@@ -514,28 +553,30 @@ public:
         std::lock_guard<std::mutex> run_lock(run_mutex_);
         // Feed each declared input by name (models differ: DistilBERT/RoBERTa
         // have no token_type_ids; BERT/DeBERTa do).
-        for (size_t i = 0; i < input_names_.size(); ++i) {
-            const std::string& name = input_names_[i];
+        for (size_t i = 0; i < sig->input_names.size(); ++i) {
+            const std::string& name = sig->input_names[i];
             const std::vector<int32_t>* src = nullptr;
             if (name == "input_ids") src = &ids32;
             else if (name == "attention_mask") src = &mask32;
             else if (name == "token_type_ids") src = &types32;
             else throw std::runtime_error("unexpected model input: " + name);
-            if (!inputs_[i].Write<int32_t>(litert::Span<const int32_t>(src->data(), src->size()))) {
+            if (!sig->inputs[i].Write<int32_t>(litert::Span<const int32_t>(src->data(), src->size()))) {
                 throw std::runtime_error("cannot write model input " + name);
             }
         }
-        if (!model_->Run(inputs_, outputs_)) throw std::runtime_error("LiteRT inference failed");
+        if (!model_->Run(sig->index, sig->inputs, sig->outputs)) {
+            throw std::runtime_error("LiteRT inference failed");
+        }
 
         size_t out_count = 1;
-        for (auto d : out_shape_) out_count *= static_cast<size_t>(d);
+        for (auto d : sig->out_shape) out_count *= static_cast<size_t>(d);
         std::vector<float> logit_buf(out_count);
-        if (!outputs_[0].Read<float>(litert::Span<float>(logit_buf.data(), logit_buf.size()))) {
+        if (!sig->outputs[0].Read<float>(litert::Span<float>(logit_buf.data(), logit_buf.size()))) {
             throw std::runtime_error(
                 "cannot read float32 logits (fp16/quantized-output exports are not supported)");
         }
         const float* logits = logit_buf.data();
-        const std::vector<int64_t>& out_shape = out_shape_;
+        const std::vector<int64_t>& out_shape = sig->out_shape;
         const size_t num_labels = manifest_.id2label.size();
 
         // Guard against a model/manifest mismatch before indexing the buffer.
@@ -603,16 +644,20 @@ public:
 private:
     std::unique_ptr<litert::Environment> env_;
     std::unique_ptr<litert::CompiledModel> model_;
-    std::vector<litert::TensorBuffer> inputs_;
-    std::vector<litert::TensorBuffer> outputs_;
-    std::vector<int64_t> out_shape_;
-    size_t fixed_len_ = 0;
+    struct Signature {
+        size_t index = 0;
+        size_t len = 0;
+        std::vector<std::string> input_names;
+        std::vector<litert::TensorBuffer> inputs;
+        std::vector<litert::TensorBuffer> outputs;
+        std::vector<int64_t> out_shape;
+    };
+    std::vector<Signature> signatures_;
     std::mutex run_mutex_;
     TokenizerHandle tokenizer_ = nullptr;
     int64_t pad_id_ = -1;  // >= 0 when tokenizer.json enables padding
     std::set<int64_t> special_ids_;
     std::mutex tokenizer_mutex_;
-    std::vector<std::string> input_names_;
     Manifest manifest_;
 };
 
@@ -621,7 +666,7 @@ private:
 int main(int argc, char** argv) {
     try {
         Args args = parse_args(argc, argv);
-        Model model(args.model_path, args.verbose);
+        Model model(args.model_path, args.threads, args.weight_cache, args.verbose);
 
         httplib::Server srv;
         srv.Get("/health", [](const httplib::Request&, httplib::Response& res) {

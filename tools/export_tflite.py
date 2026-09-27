@@ -5,7 +5,10 @@ Mirrors the lemonade-sdk ONNX classifier export (export.py in the *-ONNX repos):
 same fixtures, same manifest.json and validation.json outputs, so the two engines
 are held to the same parity bar.
 
-    python export_tflite.py <hf_model_id> <out_dir> [--seq-len 512]
+    python export_tflite.py <hf_model_id> <out_dir> [--seq-lens 64,128,256,512]
+
+One signature per sequence length ("seq_<L>"), sharing the weights, so a server
+can run each request at the smallest length that fits it.
 
 Outputs into <out_dir>: model.tflite, the tokenizer files (incl. tokenizer.json),
 config.json, manifest.json and validation.json.
@@ -55,20 +58,25 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model_id")
     ap.add_argument("out")
-    ap.add_argument("--seq-len", type=int, default=512)
+    ap.add_argument("--seq-lens", default="64,128,256,512")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
+    seq_lens = sorted({int(x) for x in args.seq_lens.split(",")})
     tok = AutoTokenizer.from_pretrained(args.model_id)
     model = AutoModelForSequenceClassification.from_pretrained(args.model_id).eval()
     wrapped = Logits(model).eval()
 
-    ids, mask = encode(tok, FIXTURES[0], args.seq_len)
     # Keyword samples name the signature inputs input_ids / attention_mask, so a
     # server can bind them by name the way ort-server binds ONNX inputs.
-    edge = litert_torch.convert(wrapped, sample_kwargs={
-        "input_ids": torch.from_numpy(ids), "attention_mask": torch.from_numpy(mask)})
+    converter = None
+    for n in seq_lens:
+        ids, mask = encode(tok, FIXTURES[0], n)
+        kw = {"input_ids": torch.from_numpy(ids), "attention_mask": torch.from_numpy(mask)}
+        converter = (litert_torch.signature(f"seq_{n}", wrapped, sample_kwargs=kw) if converter is None
+                     else converter.signature(f"seq_{n}", wrapped, sample_kwargs=kw))
+    edge = converter.convert()
     edge.export(str(out / "model.tflite"))
 
     tok.save_pretrained(out)
@@ -79,30 +87,31 @@ def main() -> None:
         "id2label": id2label,
         "score_normalization": "softmax",
         "token_aggregation": None,
-        "max_sequence_length": args.seq_len,
+        "max_sequence_length": seq_lens[-1],
     }, indent=2) + "\n")
 
     interp = Interpreter(model_path=str(out / "model.tflite"))
-    runner = interp.get_signature_runner()
-    input_names = sorted(runner.get_input_details().keys())
-    assert input_names == ["attention_mask", "input_ids"], input_names
     max_delta = 0.0
     per_fixture = []
-    for text in FIXTURES:
-        ids, mask = encode(tok, text, args.seq_len)
-        with torch.no_grad():
-            ref = softmax(wrapped(torch.from_numpy(ids), torch.from_numpy(mask)).numpy())[0]
-        feeds = {"input_ids": ids, "attention_mask": mask}
-        got = softmax(next(iter(runner(**feeds).values())))[0]
-        delta = float(np.abs(ref - got).max())
-        max_delta = max(max_delta, delta)
-        per_fixture.append({"text": text, "reference": ref.round(6).tolist(),
-                            "tflite": got.round(6).tolist(), "max_delta": delta})
+    for n in seq_lens:
+        runner = interp.get_signature_runner(f"seq_{n}")
+        input_names = sorted(runner.get_input_details().keys())
+        assert input_names == ["attention_mask", "input_ids"], input_names
+        for text in FIXTURES:
+            ids, mask = encode(tok, text, n)
+            with torch.no_grad():
+                ref = softmax(wrapped(torch.from_numpy(ids), torch.from_numpy(mask)).numpy())[0]
+            feeds = {"input_ids": ids, "attention_mask": mask}
+            got = softmax(next(iter(runner(**feeds).values())))[0]
+            delta = float(np.abs(ref - got).max())
+            max_delta = max(max_delta, delta)
+            per_fixture.append({"signature": f"seq_{n}", "text": text, "reference": ref.round(6).tolist(),
+                                "tflite": got.round(6).tolist(), "max_delta": delta})
     (out / "validation.json").write_text(json.dumps({
         "compared_against": args.model_id,
         "engine": "ai_edge_litert Interpreter (LiteRT 2.2.0)",
-        "sequence_length": args.seq_len,
-        "fixtures": len(FIXTURES),
+        "signatures": [f"seq_{n}" for n in seq_lens],
+        "fixtures": len(FIXTURES) * len(seq_lens),
         "max_score_delta": max_delta,
         "per_fixture": per_fixture,
     }, indent=2) + "\n")
