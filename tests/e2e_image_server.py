@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""End-to-end checks for a running tflite-server that hosts an image model.
+
+Usage:
+  e2e_image_server.py <port> <grace_hopper.jpg>                  # defaults
+  e2e_image_server.py <port> <grace_hopper.jpg> --pixel-cap-only  # server started with --max-image-pixels 1000
+
+Standard library only. Expects the TF MobileNetV2 1.0 224 model directory made
+by tools/make_image_model_dir.py and the default limits (16 MiB images).
+"""
+
+import base64
+import http.client
+import io
+import json
+import socket
+import struct
+import sys
+import uuid
+import zlib
+
+REF_INDEX, REF_SCORE = 653, 0.803491
+failures = 0
+
+
+def check(ok, what, detail=""):
+    global failures
+    print(f"{'ok  ' if ok else 'FAIL'} {what}{(': ' + detail) if detail and not ok else ''}")
+    failures += not ok
+
+
+def request(port, method, path, body=b"", headers=None):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+    c.request(method, path, body, headers or {})
+    r = c.getresponse()
+    data = r.read()
+    try:
+        return r.status, json.loads(data)
+    except ValueError:
+        return r.status, data
+
+
+def multipart(parts):
+    b = uuid.uuid4().hex
+    out = io.BytesIO()
+    for name, value, filename in parts:
+        out.write(f"--{b}\r\nContent-Disposition: form-data; name=\"{name}\"".encode())
+        if filename:
+            out.write(f'; filename="{filename}"\r\nContent-Type: application/octet-stream'.encode())
+        out.write(b"\r\n\r\n" + value + b"\r\n")
+    out.write(f"--{b}--\r\n".encode())
+    return out.getvalue(), {"Content-Type": f"multipart/form-data; boundary={b}"}
+
+
+def post_image(port, data, top_k=None, name="image"):
+    parts = [(name, data, "x.bin")]
+    if top_k is not None:
+        parts.append(("top_k", str(top_k).encode(), None))
+    body, headers = multipart(parts)
+    return request(port, "POST", "/classify/image", body, headers)
+
+
+def post_json(port, obj):
+    return request(port, "POST", "/classify/image", json.dumps(obj).encode(), {"Content-Type": "application/json"})
+
+
+def png(width, height, raw_rows=None, idat=None):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    if idat is None:
+        raw = raw_rows if raw_rows is not None else b"".join(b"\x00" + bytes(width * 3) for _ in range(height))
+        idat = zlib.compress(raw)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", b"")
+
+
+def zip_bomb(inflated=272 << 20):
+    c = zlib.compressobj(9)
+    block = bytes(1 << 20)
+    z = b"".join(c.compress(block) for _ in range(inflated >> 20)) + c.flush()
+    return png(64, 64, idat=z)
+
+
+def oversize_raw(port, total):
+    """Send a declared-length body over a raw socket; return the HTTP status line."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=300)
+    s.sendall(
+        f"POST /classify/image HTTP/1.1\r\nHost: x\r\nContent-Type: application/octet-stream\r\n"
+        f"Content-Length: {total}\r\n\r\n".encode()
+    )
+    chunk = bytes(1 << 20)
+    try:
+        sent = 0
+        while sent < total:
+            n = min(len(chunk), total - sent)
+            s.sendall(chunk[:n])
+            sent += n
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    try:
+        line = s.recv(4096).split(b"\r\n", 1)[0].decode()
+    except ConnectionResetError:
+        line = "reset"
+    s.close()
+    return line
+
+
+def main():
+    port, gh_path = int(sys.argv[1]), sys.argv[2]
+    gh = open(gh_path, "rb").read()
+
+    if "--pixel-cap-only" in sys.argv:
+        status, body = post_image(port, png(64, 64))
+        check(status == 400 and "limit is 1000" in body.get("error", ""), "64x64 PNG over --max-image-pixels 1000 -> 400", str(body))
+        status, body = post_image(port, png(20, 20))
+        check(status == 200, "20x20 PNG under the cap -> 200", str(body)[:200])
+        sys.exit(1 if failures else 0)
+
+    status, health = request(port, "GET", "/health")
+    check(status == 200 and health.get("task") == "image-classification", "/health task", str(health))
+
+    status, body = post_image(port, gh)
+    top = body["predictions"][0] if status == 200 else {}
+    check(status == 200 and top.get("index") == REF_INDEX and abs(top.get("score", 0) - REF_SCORE) < 0.02,
+          f"multipart grace_hopper top-1 653 near {REF_SCORE}", str(body)[:300])
+    if status == 200:
+        print(f"     top-1 {top['index']} {top['label']} {top['score']:.6f}; timings {body['timings']}")
+        check(len(body["predictions"]) == 5, "default top_k is 5 (manifest top_k_default)")
+        check(body["input"] == {"width": 512, "height": 600}, "input size reported")
+
+    status, body = post_image(port, gh, top_k=3, name="file")
+    scores = [p["score"] for p in body.get("predictions", [])]
+    check(status == 200 and len(scores) == 3 and scores == sorted(scores, reverse=True),
+          "part named 'file', top_k=3, sorted", str(body)[:200])
+    check(status == 200 and set(body["labels"]) == {p["label"] for p in body["predictions"]}, "labels map matches predictions")
+
+    status, body = post_image(port, gh, top_k=5000)
+    check(status == 200 and len(body["predictions"]) == 1001, "top_k 5000 clamps to 1001 labels", str(status))
+
+    b64 = base64.b64encode(gh).decode()
+    status, body = post_json(port, {"image": b64, "top_k": 2})
+    check(status == 200 and body["predictions"][0]["index"] == REF_INDEX and len(body["predictions"]) == 2,
+          "JSON base64", str(body)[:200])
+    status, body = post_json(port, {"image": "data:image/jpeg;base64," + b64[:76] + "\n" + b64[76:]})
+    check(status == 200 and body["predictions"][0]["index"] == REF_INDEX, "JSON data URL with a line break", str(body)[:200])
+
+    status, body = request(port, "POST", "/classify", json.dumps({"input": "hi"}).encode(), {"Content-Type": "application/json"})
+    check(status == 400 and "POST /classify/image" in body.get("error", ""), "/classify on an image model -> 400", str(body))
+
+    for what, (status, body) in {
+        "no image part": request(port, "POST", "/classify/image", *multipart([("top_k", b"3", None)])),
+        "two image parts": request(port, "POST", "/classify/image", *multipart([("image", gh, "a.jpg"), ("image", gh, "b.jpg")])),
+        "image and file parts": request(port, "POST", "/classify/image", *multipart([("image", gh, "a.jpg"), ("file", gh, "b.jpg")])),
+    }.items():
+        check(status == 400 and "exactly one image part" in body.get("error", ""), f"{what} -> 400", str(body))
+
+    cases = {
+        "GIF bytes": post_image(port, b"GIF89a\x01\x00\x01\x00\x00\x00\x00;"),
+        "bad base64": post_json(port, {"image": "aGV*bG8="}),
+        "http URL": post_json(port, {"image": "https://example.com/cat.jpg"}),
+        "data URL with a non-image type": post_json(port, {"image": "data:text/plain;base64,aGVsbG8="}),
+        "top_k 0": post_image(port, gh, top_k=0),
+        "top_k abc": post_image(port, gh, top_k="abc"),
+        "JSON top_k 1.5": post_json(port, {"image": b64, "top_k": 1.5}),
+        "text/plain body": request(port, "POST", "/classify/image", b"hello", {"Content-Type": "text/plain"}),
+        "truncated PNG": post_image(port, png(64, 64)[:60]),
+        "PNG with a valid signature and garbage": post_image(port, b"\x89PNG\r\n\x1a\n" + bytes(200)),
+        "truncated JPEG header": post_image(port, gh[:200]),
+    }
+    for what, (status, body) in cases.items():
+        detail = body.get("error", "") if isinstance(body, dict) else str(body)[:100]
+        check(status == 400, f"{what} -> 400 ({detail})", f"{status} {detail}")
+
+    jpeg12 = bytearray(gh)
+    sof = jpeg12.find(b"\xff\xc0")
+    jpeg12[sof + 4] = 12
+    status, body = post_image(port, bytes(jpeg12))
+    check(status == 400, f"12-bit JPEG -> 400 ({body.get('error')})", str(body))
+
+    bomb = zip_bomb()
+    status, body = post_image(port, bomb)
+    check(status == 400 and body.get("error") == "image decode exceeded memory budget",
+          f"PNG zip bomb ({len(bomb)} bytes, inflates to 272 MiB) -> 400", str(body))
+
+    status, body = post_image(port, bytes(20 * 1000 * 1000))
+    check(status == 413, "20 MB image part -> 413", f"{status} {body if isinstance(body, dict) else ''}")
+    line = oversize_raw(port, 30 * 1000 * 1000)
+    check(" 413 " in line, "30 MB body over the payload limit -> 413 from httplib", line)
+
+    status, health = request(port, "GET", "/health")
+    status2, body = post_image(port, gh)
+    check(status == 200 and status2 == 200 and body["predictions"][0]["index"] == REF_INDEX, "still healthy and correct afterwards")
+
+    print(f"{failures} failure(s)")
+    sys.exit(1 if failures else 0)
+
+
+if __name__ == "__main__":
+    main()
