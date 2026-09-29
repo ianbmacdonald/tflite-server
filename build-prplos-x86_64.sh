@@ -16,7 +16,7 @@ cmake -S "$SRC" -B "$BLD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLITERT_SRC=$R/litert-v220 -DLITERT_BUILD=$R/litert-v220-musl-x86_64 \
   -DTOKENIZERS_CPP_SRC=$R/tokenizers-cpp \
   -DTOKENIZERS_C_LIB=$R/tokenizers-cpp/rust/target/x86_64-unknown-linux-musl/release/libtokenizers_c.a
-nice -n 19 cmake --build "$BLD" -j20
+nice -n 19 cmake --build "$BLD" -j"${JOBS:-8}"
 "$T/x86_64-openwrt-linux-musl-strip" -o "$BLD/tflite-server.stripped" "$BLD/tflite-server"
 file "$BLD/tflite-server"
 ls -la "$BLD/tflite-server" "$BLD/tflite-server.stripped" | awk '{print $5, $9}'

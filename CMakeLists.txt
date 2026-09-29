@@ -1,21 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
-project(tflite-server CXX)
+project(tflite-server VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# LiteRT is consumed as a CMake build tree of the LiteRT repo (static libraries),
-# e.g. built with prpl-harness build/litert/litert-v2.2.0-musl-build.sh.
-set(LITERT_SRC "" CACHE PATH "LiteRT source checkout (the repo root that contains litert/ and tflite/)")
-set(LITERT_BUILD "" CACHE PATH "LiteRT CMake build tree (configured from <LITERT_SRC>/litert)")
-# tokenizers-cpp's Rust C shim, built for the target (cargo build --release --target ...).
-set(TOKENIZERS_CPP_SRC "" CACHE PATH "mlc-ai/tokenizers-cpp checkout (for include/tokenizers_c.h)")
-set(TOKENIZERS_C_LIB "" CACHE FILEPATH "libtokenizers_c.a built for the target")
-foreach(v LITERT_SRC LITERT_BUILD TOKENIZERS_CPP_SRC TOKENIZERS_C_LIB)
-  if(NOT ${v})
-    message(FATAL_ERROR "${v} is required")
-  endif()
-endforeach()
+option(TFLITE_SERVER_PREPROCESS_TESTS
+  "Build the image preprocessing tests (they need neither LiteRT nor tokenizers-cpp)" OFF)
 
 include(FetchContent)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
@@ -27,7 +17,56 @@ FetchContent_Declare(httplib
 FetchContent_Declare(json
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03)  # v3.11.3
-FetchContent_MakeAvailable(httplib json)
+FetchContent_MakeAvailable(json)
+
+find_package(Threads REQUIRED)
+
+# Decode, resize and manifest parsing: no LiteRT, so the tests build anywhere.
+add_library(tflite_image STATIC
+  src/image_manifest.cpp
+  src/image_preprocess.cpp
+  src/stb_image_impl.cpp)
+target_include_directories(tflite_image PUBLIC src third_party/stb)
+target_link_libraries(tflite_image PUBLIC nlohmann_json::nlohmann_json)
+
+if(TFLITE_SERVER_PREPROCESS_TESTS)
+  enable_testing()
+  add_executable(test_image_preprocess tests/test_image_preprocess.cpp)
+  target_link_libraries(test_image_preprocess PRIVATE tflite_image Threads::Threads)
+  add_executable(test_image_manifest tests/test_image_manifest.cpp)
+  target_link_libraries(test_image_manifest PRIVATE tflite_image)
+  add_executable(fuzz_image_decode tests/fuzz_image_decode.cpp)
+  target_link_libraries(fuzz_image_decode PRIVATE tflite_image)
+  add_test(NAME image_preprocess
+    COMMAND test_image_preprocess "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+  add_test(NAME image_manifest
+    COMMAND test_image_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+  add_test(NAME image_decode_fuzz_smoke
+    COMMAND fuzz_image_decode "${CMAKE_CURRENT_SOURCE_DIR}/tests/data" 2000)
+endif()
+
+# LiteRT is consumed as a CMake build tree of the LiteRT repo (static libraries),
+# e.g. built with prpl-harness build/litert/litert-v2.2.0-musl-build.sh.
+set(LITERT_SRC "" CACHE PATH "LiteRT source checkout (the repo root that contains litert/ and tflite/)")
+set(LITERT_BUILD "" CACHE PATH "LiteRT CMake build tree (configured from <LITERT_SRC>/litert)")
+# tokenizers-cpp's Rust C shim, built for the target (cargo build --release --target ...).
+set(TOKENIZERS_CPP_SRC "" CACHE PATH "mlc-ai/tokenizers-cpp checkout (for include/tokenizers_c.h)")
+set(TOKENIZERS_C_LIB "" CACHE FILEPATH "libtokenizers_c.a built for the target")
+set(_missing "")
+foreach(v LITERT_SRC LITERT_BUILD TOKENIZERS_CPP_SRC TOKENIZERS_C_LIB)
+  if(NOT ${v})
+    list(APPEND _missing ${v})
+  endif()
+endforeach()
+if(_missing)
+  if(TFLITE_SERVER_PREPROCESS_TESTS)
+    message(STATUS "tflite-server: tests-only build (${_missing} not set); the server is not built")
+    return()
+  endif()
+  message(FATAL_ERROR "${_missing} required")
+endif()
+
+FetchContent_MakeAvailable(httplib)
 
 # Every static archive of the LiteRT build except its CLI tools and test/bench
 # harnesses, linked as one group: the dependency order inside LiteRT's tree is
@@ -39,7 +78,11 @@ list(FILTER _litert_archives EXCLUDE REGEX "/testdata/|-src/")
 list(LENGTH _litert_archives _n)
 message(STATUS "tflite-server: linking ${_n} LiteRT archives from ${LITERT_BUILD}")
 
-add_executable(tflite-server src/main.cpp)
+add_executable(tflite-server
+  src/main.cpp
+  src/image_model.cpp
+  src/litert_engine.cpp
+  src/text_model.cpp)
 # LiteRT's C++ headers reuse type names as member names (Span, ElementType), which
 # GCC rejects by default; LiteRT's own CMake build compiles with -fpermissive too.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -55,7 +98,8 @@ target_include_directories(tflite-server PRIVATE
   "${LITERT_BUILD}/tflite_build/tensorflow-src"
   "${TOKENIZERS_CPP_SRC}/include")
 target_link_libraries(tflite-server PRIVATE
+  tflite_image
   httplib::httplib nlohmann_json::nlohmann_json
   -Wl,--start-group ${_litert_archives} -Wl,--end-group
   "${TOKENIZERS_C_LIB}"
-  ${CMAKE_DL_LIBS} pthread m)
+  ${CMAKE_DL_LIBS} Threads::Threads m)

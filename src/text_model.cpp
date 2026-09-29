@@ -1,0 +1,656 @@
+// Text and token classification: the v0.1.0 model, unchanged apart from
+// sharing make_compiled_model() with the image path.
+//
+// Derived from lemonade-sdk/ort-server (Apache-2.0): the same /classify contract,
+// manifest handling, tokenizer handling and model-family allowlist, with the
+// ONNX Runtime session replaced by a LiteRT CompiledModel (CPU, XNNPACK).
+//
+// The model is a plain exported .tflite graph whose signature takes
+// input_ids / attention_mask [/ token_type_ids] at a FIXED sequence length and
+// returns logits; inputs are padded to that length with a zero attention mask.
+// Original header follows.
+//
+// v1: CPU EP, text classification. The model is a plain exported ONNX graph
+// (input_ids / attention_mask / token_type_ids -> logits). This process loads
+// the model + its HF tokenizer (via tokenizers-cpp), derives the output
+// contract from an optional manifest.json (or infers it from the export's own
+// config.json), tokenizes the request at /classify, runs the session, and
+// shapes the output (normalize for sequence-classification, per-token
+// aggregation for token-classification).
+
+#include "text_model.h"
+
+#include "errors.h"
+#include "litert_engine.h"
+
+#include "litert/cc/litert_common.h"
+#include "litert/cc/litert_compiled_model.h"
+#include "litert/cc/litert_tensor_buffer.h"
+
+// tokenizers-cpp loads the model's own HF tokenizer.json and tokenizes in
+// process. The C API is used directly: the C++ wrapper's base interface
+// hardcodes add_special_tokens=false, but encoder classifiers need [CLS]/[SEP]
+// to match the HuggingFace reference they were validated against.
+#include "tokenizers_c.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+namespace {
+
+struct Manifest {
+    std::string task;                   // "text-classification" | "token-classification"
+    std::vector<std::string> id2label;  // index -> label
+    std::string score_normalization = "softmax";  // "softmax" | "sigmoid"
+    std::string token_aggregation = "max";        // token-cls only; "max" | "mean"
+    int max_length = 512;               // token budget; longer inputs are truncated
+};
+
+struct Args {
+    std::string model_path;
+    int port = 0;
+    int threads = 0;  // 0: one per hardware thread
+    std::string weight_cache;  // XNNPACK packed-weight cache file; empty = in memory
+    bool verbose = false;
+};
+
+Args parse_args(int argc, char** argv) {
+    Args a;
+    for (int i = 1; i < argc; ++i) {
+        std::string f = argv[i];
+        if (f == "--model-path" && i + 1 < argc) a.model_path = argv[++i];
+        else if (f == "--port" && i + 1 < argc) a.port = std::stoi(argv[++i]);
+        else if (f == "--threads" && i + 1 < argc) a.threads = std::stoi(argv[++i]);
+        else if (f == "--weight-cache" && i + 1 < argc) a.weight_cache = argv[++i];
+        else if (f == "--verbose") a.verbose = true;
+    }
+    if (a.model_path.empty() || a.port == 0) {
+        throw std::runtime_error("usage: tflite-server --model-path <dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]");
+    }
+    return a;
+}
+
+void parse_id2label(const json& id2label, Manifest& m, const std::string& origin) {
+    if (!id2label.is_object() || id2label.empty()) {
+        throw std::runtime_error("id2label is missing or empty in " + origin);
+    }
+    m.id2label.resize(id2label.size());
+    std::vector<bool> seen(id2label.size(), false);
+    for (auto it = id2label.begin(); it != id2label.end(); ++it) {
+        size_t pos = 0;
+        unsigned long idx = 0;
+        try {
+            idx = std::stoul(it.key(), &pos);
+        } catch (const std::exception&) {
+            pos = 0;
+        }
+        if (pos != it.key().size()) {
+            throw std::runtime_error("id2label key '" + it.key() + "' is not an index in " + origin);
+        }
+        if (idx >= m.id2label.size() || seen[idx]) {
+            throw std::runtime_error("id2label keys must be unique and contiguous 0..n-1 in " + origin);
+        }
+        if (!it.value().is_string()) {
+            throw std::runtime_error("id2label values must be strings in " + origin);
+        }
+        seen[idx] = true;
+        m.id2label[idx] = it.value().get<std::string>();
+    }
+}
+
+json read_json_if_present(const fs::path& p) {
+    std::ifstream f(p);
+    if (!f) return json::object();
+    try {
+        json j; f >> j;
+        return j.is_object() ? j : json::object();
+    } catch (const std::exception&) {
+        return json::object();
+    }
+}
+
+// This server feeds the model a single sequence with a fabricated all-ones
+// attention mask and all-zero token_type_ids, and truncates by keeping the
+// trailing token. That is exactly right for BERT-family single-sequence
+// encoders and wrong for architectures with different segment/special-token
+// conventions (XLNet puts its classifier token last with a distinct segment
+// id), so the supported set is an explicit allowlist rather than a claim.
+const std::set<std::string>& supported_model_types() {
+    static const std::set<std::string> kSupported = {
+        "albert", "bert",     "camembert",  "deberta", "deberta-v2",
+        "distilbert", "electra", "roberta", "xlm-roberta", "modernbert",
+        "openai_privacy_filter", "pii_masking"
+    };
+    return kSupported;
+}
+
+void validate_model_family(const json& config, const fs::path& dir) {
+    // A manifest describes the OUTPUT contract (labels, normalization). It says
+    // nothing about the INPUT convention — attention mask, segment ids, special
+    // tokens — which is what this server hardcodes. So a manifest cannot excuse
+    // a missing config.json: without it we cannot know the architecture, and an
+    // unchecked one would be served with a fabricated mask that may not fit.
+    if (config.empty()) {
+        throw std::runtime_error(
+            "config.json is missing or unreadable in " + dir.string() +
+            ". It is required (even alongside a manifest.json) to confirm the "
+            "model uses the single-sequence encoder convention this server "
+            "implements.");
+    }
+    std::string model_type;
+    if (config.contains("model_type") && config["model_type"].is_string()) {
+        model_type = config["model_type"].get<std::string>();
+    }
+    if (model_type.empty()) {
+        throw std::runtime_error("config.json in " + dir.string() +
+                                 " declares no model_type; cannot verify that this "
+                                 "architecture uses the single-sequence encoder "
+                                 "convention tflite-server implements");
+    }
+    if (!supported_model_types().count(model_type)) {
+        std::string supported;
+        for (const auto& t : supported_model_types()) {
+            supported += (supported.empty() ? "" : ", ") + t;
+        }
+        throw std::runtime_error(
+            "unsupported model_type '" + model_type +
+            "'. tflite-server implements the single-sequence encoder convention "
+            "(all-ones attention mask, all-zero token_type_ids, trailing-token "
+            "truncation), which is valid for: " + supported +
+            ". Other architectures need their own mask/segment handling.");
+    }
+}
+
+// max_length precedence mirrors the exporter: the tokenizer's declared budget,
+// then the model's position table (less 2 — RoBERTa-family configs declare
+// max_position_embeddings larger than the usable budget), then 512.
+void apply_inferred_max_length(const json& tokenizer_config, const json& config, Manifest& m) {
+    auto valid = [](const json& j, const char* key) -> int {
+        // HF writes a huge sentinel (1e30) when the tokenizer has no real limit;
+        // that parses as a double and is skipped by the integer check.
+        if (!j.contains(key) || !j[key].is_number_integer()) return 0;
+        auto n = j[key].get<long long>();
+        return (n >= 2 && n <= 1000000) ? static_cast<int>(n) : 0;
+    };
+    if (int n = valid(tokenizer_config, "model_max_length")) {
+        m.max_length = n;
+        return;
+    }
+    if (int n = valid(config, "max_position_embeddings")) {
+        m.max_length = n > 4 ? n - 2 : n;
+        return;
+    }
+    m.max_length = 512;
+}
+
+Manifest manifest_from_json(const fs::path& dir) {
+    std::ifstream f(dir / "manifest.json");
+    if (!f) throw std::runtime_error("cannot open manifest.json in " + dir.string());
+    json j; f >> j;
+    Manifest m;
+    // Even with an explicit manifest, the tokenization/mask conventions below
+    // still have to hold for this architecture.
+    validate_model_family(read_json_if_present(dir / "config.json"), dir);
+    m.task = j.at("task").get<std::string>();
+    if (m.task != "text-classification" && m.task != "token-classification") {
+        throw std::runtime_error("unsupported task in manifest.json: '" + m.task +
+                                 "' (expected text-classification, token-classification or "
+                                 "image-classification)");
+    }
+    // Wrong-typed values are errors, not silent fallbacks to defaults.
+    if (j.contains("score_normalization")) {
+        if (!j["score_normalization"].is_string()) {
+            throw std::runtime_error("score_normalization must be a string");
+        }
+        m.score_normalization = j["score_normalization"].get<std::string>();
+    }
+    // "none" is rejected: the /classify contract promises label scores in [0,1].
+    if (m.score_normalization != "softmax" && m.score_normalization != "sigmoid") {
+        throw std::runtime_error("unsupported score_normalization: " + m.score_normalization);
+    }
+    // token_aggregation is null for sequence-classification; tolerate null/absent,
+    // but reject unknown values regardless of task.
+    if (j.contains("token_aggregation") && !j["token_aggregation"].is_null()) {
+        if (!j["token_aggregation"].is_string()) {
+            throw std::runtime_error("token_aggregation must be a string or null");
+        }
+        m.token_aggregation = j["token_aggregation"].get<std::string>();
+        if (m.token_aggregation != "max" && m.token_aggregation != "mean") {
+            throw std::runtime_error("unsupported token_aggregation: " + m.token_aggregation);
+        }
+    }
+    if (j.contains("max_length")) {
+        if (!j["max_length"].is_number_integer()) {
+            throw std::runtime_error("max_length must be an integer");
+        }
+        m.max_length = j["max_length"].get<int>();
+        if (m.max_length < 2) throw std::runtime_error("max_length must be >= 2");
+    } else {
+        // Manifest omits the budget: fall back to the model's own metadata
+        // rather than a blanket 512, which can overflow a smaller position table.
+        apply_inferred_max_length(read_json_if_present(dir / "tokenizer_config.json"),
+                                  read_json_if_present(dir / "config.json"), m);
+    }
+    parse_id2label(j.at("id2label"), m, "manifest.json");
+    return m;
+}
+
+// Fallback for a stock HF/Optimum export (no manifest.json): infer the contract
+// from config.json (+ tokenizer_config.json), applying HF problem_type semantics.
+Manifest manifest_from_hf_config(const fs::path& dir) {
+    std::ifstream f(dir / "config.json");
+    if (!f) {
+        throw std::runtime_error("neither manifest.json nor config.json found in " +
+                                 dir.string());
+    }
+    json j; f >> j;
+    Manifest m;
+    validate_model_family(j, dir);
+
+    std::string arch;
+    if (j.contains("architectures") && j["architectures"].is_array() &&
+        !j["architectures"].empty() && j["architectures"][0].is_string()) {
+        arch = j["architectures"][0].get<std::string>();
+    }
+    auto ends_with = [](const std::string& s, const std::string& suffix) {
+        return s.size() >= suffix.size() &&
+               s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    if (ends_with(arch, "ForTokenClassification")) {
+        m.task = "token-classification";
+    } else if (ends_with(arch, "ForSequenceClassification")) {
+        m.task = "text-classification";
+    } else {
+        throw std::runtime_error("cannot infer task from config.json architecture '" +
+                                 arch + "'; provide a manifest.json");
+    }
+
+    // problem_type is only a training-time hint: models trained with BCE outside
+    // the HF Trainer routinely leave it null, so an absent value CANNOT be read
+    // as "single-label". Manifest-less inference therefore ASSUMES single-label
+    // softmax and says so; a multi-label model must declare it — either via
+    // problem_type in its config, or with an explicit manifest.json.
+    std::string problem_type;
+    if (j.contains("problem_type") && j["problem_type"].is_string()) {
+        problem_type = j["problem_type"].get<std::string>();
+    }
+    if (problem_type == "regression") {
+        throw std::runtime_error("regression heads have no label scores in [0,1]");
+    }
+    if (m.task == "text-classification" && problem_type == "multi_label_classification") {
+        m.score_normalization = "sigmoid";
+    } else {
+        m.score_normalization = "softmax";
+        if (m.task == "text-classification" && problem_type.empty()) {
+            fprintf(stderr,
+                    "tflite-server: config.json declares no problem_type; assuming "
+                    "SINGLE-LABEL softmax. If this is a multi-label (BCE-trained) "
+                    "model, supply a manifest.json with "
+                    "\"score_normalization\": \"sigmoid\" — otherwise the scores "
+                    "will be wrong.\n");
+        }
+    }
+
+    parse_id2label(j.at("id2label"), m, "config.json");
+    if (m.id2label.size() < 2) {
+        throw std::runtime_error("single-output heads have no label scores in [0,1]");
+    }
+    apply_inferred_max_length(read_json_if_present(dir / "tokenizer_config.json"), j, m);
+    return m;
+}
+
+// manifest.json (explicit contract, validated strictly) wins; a bare Optimum
+// export runs via config.json inference so users need no lemonade tooling.
+Manifest load_manifest(const fs::path& dir) {
+    if (fs::exists(dir / "manifest.json")) return manifest_from_json(dir);
+    return manifest_from_hf_config(dir);
+}
+
+std::vector<float> softmax(const float* v, size_t n) {
+    float mx = *std::max_element(v, v + n);
+    std::vector<float> out(n);
+    double sum = 0;
+    for (size_t i = 0; i < n; ++i) { out[i] = std::exp(v[i] - mx); sum += out[i]; }
+    for (auto& x : out) x = static_cast<float>(x / sum);
+    return out;
+}
+
+std::vector<float> normalize(const float* v, size_t n, const std::string& mode) {
+    if (mode == "softmax") return softmax(v, n);
+    std::vector<float> out(n);
+    for (size_t i = 0; i < n; ++i) out[i] = 1.0f / (1.0f + std::exp(-v[i]));
+    return out;
+}
+
+std::string load_bytes(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open " + p.string());
+    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+}
+
+// Collect the token ids the post-processor INSERTS ([CLS]/[SEP], <s>/</s>, …).
+// The HF tokenizer serializes these three ways, and a "Sequence" can nest them:
+//   TemplateProcessing  -> special_tokens[*].ids   (modern BERT/DistilBERT)
+//   BertProcessing      -> cls / sep = [token, id]
+//   RobertaProcessing   -> cls / sep = [token, id]  (stock RoBERTa; different shape)
+// Reading only TemplateProcessing would silently miss RoBERTa's <s>/</s>, leaving
+// them in token-classification aggregation that HF's pipeline drops.
+void collect_inserted_special_ids(const json& pp, std::set<int64_t>& out) {
+    if (!pp.is_object()) return;
+    const std::string type = pp.value("type", "");
+    if (type == "Sequence" && pp.contains("processors") && pp["processors"].is_array()) {
+        for (const auto& child : pp["processors"]) collect_inserted_special_ids(child, out);
+        return;
+    }
+    if (pp.contains("special_tokens") && pp["special_tokens"].is_object()) {
+        for (const auto& entry : pp["special_tokens"]) {
+            if (!entry.is_object() || !entry.contains("ids")) continue;
+            for (const auto& id : entry["ids"]) {
+                if (id.is_number_integer()) out.insert(id.get<int64_t>());
+            }
+        }
+    }
+    for (const char* field : {"cls", "sep"}) {
+        if (pp.contains(field) && pp[field].is_array() && pp[field].size() == 2 &&
+            pp[field][1].is_number_integer()) {
+            out.insert(pp[field][1].get<int64_t>());
+        }
+    }
+}
+
+class Model {
+public:
+    Model(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
+        : manifest_(load_manifest(dir)) {
+        (void)verbose;
+        std::string blob = load_bytes(dir / "tokenizer.json");
+
+        // Parse BEFORE handing the blob to the Rust tokenizer: it unwraps its
+        // parse Result, so a truncated or corrupt tokenizer.json (a partial
+        // download, say) panics across the FFI and aborts the process with no
+        // usable message. Fail cleanly instead.
+        json tj;
+        try {
+            tj = json::parse(blob);
+        } catch (const std::exception& e) {
+            throw std::runtime_error("tokenizer.json in " + dir.string() +
+                                     " is not valid JSON (truncated or corrupt "
+                                     "download?): " + e.what());
+        }
+
+        tokenizer_ = tokenizers_new_from_str(blob.data(), blob.size());
+        if (!tokenizer_) throw std::runtime_error("failed to load tokenizer.json from " + dir.string());
+
+        // Positions the tokenizer INSERTS ([CLS]/[SEP] from the post-processor
+        // template, plus padding). They belong in the model's INPUT — sequence
+        // classifiers pool [CLS] — but HuggingFace's token-classification
+        // pipeline drops them from its OUTPUT, so aggregating them would report
+        // entities the reference never does.
+        //
+        // Deliberately NOT every `added_token` marked special: [UNK] and [MASK]
+        // are special *tokens* but appear as ordinary content positions (an
+        // out-of-vocabulary word becomes [UNK] and HF still scores it), and
+        // HF's special_tokens_mask marks them 0.
+        if (tj.contains("post_processor")) {
+            collect_inserted_special_ids(tj["post_processor"], special_ids_);
+        }
+
+        // A tokenizer.json that carries a `padding` section pads every encoding
+        // out to a fixed width — the HuggingFace reference does NOT pad by
+        // default, so those trailing [PAD] ids must be dropped. Feeding them to
+        // the model (under our all-ones attention mask) makes it attend to
+        // padding as if it were text and silently corrupts the scores.
+        if (tj.contains("padding") && tj["padding"].is_object() &&
+            tj["padding"].contains("pad_id") &&
+            tj["padding"]["pad_id"].is_number_integer()) {
+            pad_id_ = tj["padding"]["pad_id"].get<int64_t>();
+            special_ids_.insert(pad_id_);
+        }
+
+        threads = resolve_threads(threads);
+        lm_ = make_compiled_model(dir / "model.tflite", threads, weight_cache);
+        litert::CompiledModel* model_ = lm_.model.get();
+
+        // Each signature is the same graph at one fixed sequence length (the
+        // exporter writes seq_64, seq_128, ...). A request runs on the smallest
+        // one that holds it, so short inputs don't pay for the longest length.
+        auto keys = model_->GetSignatureKeys();
+        if (!keys || keys->empty()) throw std::runtime_error("model.tflite has no signatures");
+        for (size_t si = 0; si < keys->size(); ++si) {
+            Signature sig;
+            sig.index = si;
+            auto names = model_->GetSignatureInputNames(si);
+            if (!names) throw std::runtime_error("model.tflite has no readable signature inputs");
+            for (const auto& n : *names) sig.input_names.emplace_back(n.data(), n.size());
+            auto inputs = model_->CreateInputBuffers(si);
+            auto outputs = model_->CreateOutputBuffers(si);
+            if (!inputs || !outputs || outputs->empty()) {
+                throw std::runtime_error("cannot allocate LiteRT input/output buffers");
+            }
+            sig.inputs = std::move(*inputs);
+            sig.outputs = std::move(*outputs);
+            auto t = sig.inputs.at(0).TensorType();
+            if (!t) throw std::runtime_error("cannot read the model's input tensor type");
+            auto dims = t->Layout().Dimensions();
+            if (dims.size() != 2 || dims[0] != 1 || dims[1] < 2) {
+                throw std::runtime_error("model inputs must be [1, seq_len]");
+            }
+            sig.len = static_cast<size_t>(dims[1]);
+            auto ot = sig.outputs.at(0).TensorType();
+            if (!ot) throw std::runtime_error("cannot read the model's output tensor type");
+            for (auto d : ot->Layout().Dimensions()) sig.out_shape.push_back(d);
+            signatures_.push_back(std::move(sig));
+        }
+        std::sort(signatures_.begin(), signatures_.end(),
+                  [](const Signature& a, const Signature& b) { return a.len < b.len; });
+        const size_t longest = signatures_.back().len;
+        if (static_cast<size_t>(manifest_.max_length) > longest) {
+            manifest_.max_length = static_cast<int>(longest);
+        }
+        if (verbose) {
+            std::string lens;
+            for (const auto& sig : signatures_) lens += (lens.empty() ? "" : ",") + std::to_string(sig.len);
+            fprintf(stderr, "tflite-server: %zu signature(s), lengths %s, %d thread(s)\n",
+                    signatures_.size(), lens.c_str(), threads);
+        }
+    }
+
+    ~Model() {
+        if (tokenizer_) tokenizers_free(tokenizer_);
+    }
+    Model(const Model&) = delete;
+    Model& operator=(const Model&) = delete;
+
+    const std::string& task() const { return manifest_.task; }
+
+    json classify(const std::string& text, int top_k) {
+        // Special tokens ON: encoder classifiers pool [CLS]/use [SEP], and the
+        // catalog's parity validation runs the HF tokenizer with them enabled —
+        // serving without them would silently diverge from the validated scores.
+        // The mutex covers the Rust FFI's &mut self contract; tokenization is
+        // microseconds next to the session run, which stays concurrent.
+        std::vector<int64_t> input_ids;
+        {
+            std::lock_guard<std::mutex> lock(tokenizer_mutex_);
+            TokenizerEncodeResult result;
+            tokenizers_encode(tokenizer_, text.data(), text.size(),
+                              /*add_special_token=*/1, &result);
+            input_ids.assign(result.token_ids, result.token_ids + result.len);
+            tokenizers_free_encode_results(&result, 1);
+        }
+        // Drop the tokenizer's own padding so the model sees exactly what the
+        // HuggingFace reference sees (see pad_id_ in the constructor).
+        if (pad_id_ >= 0) {
+            while (input_ids.size() > 1 && input_ids.back() == pad_id_) {
+                input_ids.pop_back();
+            }
+        }
+        if (input_ids.empty()) throw std::runtime_error("empty tokenization");
+
+        // Truncate to the manifest's token budget, keeping the trailing token
+        // (usually [SEP] / </s>) so the sequence stays well-formed.
+        const size_t max_len = static_cast<size_t>(manifest_.max_length);
+        if (input_ids.size() > max_len) {
+            int64_t last = input_ids.back();
+            input_ids.resize(max_len - 1);
+            input_ids.push_back(last);
+        }
+        const int64_t seq_len = static_cast<int64_t>(input_ids.size());
+
+        // Standard encoder inputs, padded to the export's fixed length: real
+        // positions get mask 1, padding gets mask 0 (and the pad id, or 0).
+        (void)seq_len;
+        Signature* sig = &signatures_.back();
+        for (auto& candidate : signatures_) {
+            if (candidate.len >= input_ids.size()) { sig = &candidate; break; }
+        }
+        const size_t fixed_len = sig->len;
+        const int32_t pad = pad_id_ >= 0 ? static_cast<int32_t>(pad_id_) : 0;
+        std::vector<int32_t> ids32(fixed_len, pad), mask32(fixed_len, 0), types32(fixed_len, 0);
+        for (size_t i = 0; i < input_ids.size(); ++i) {
+            ids32[i] = static_cast<int32_t>(input_ids[i]);
+            mask32[i] = 1;
+        }
+
+        // One compiled model and one set of buffers: serialize inference.
+        std::lock_guard<std::mutex> run_lock(run_mutex_);
+        // Feed each declared input by name (models differ: DistilBERT/RoBERTa
+        // have no token_type_ids; BERT/DeBERTa do).
+        for (size_t i = 0; i < sig->input_names.size(); ++i) {
+            const std::string& name = sig->input_names[i];
+            const std::vector<int32_t>* src = nullptr;
+            if (name == "input_ids") src = &ids32;
+            else if (name == "attention_mask") src = &mask32;
+            else if (name == "token_type_ids") src = &types32;
+            else throw std::runtime_error("unexpected model input: " + name);
+            if (!sig->inputs[i].Write<int32_t>(litert::Span<const int32_t>(src->data(), src->size()))) {
+                throw std::runtime_error("cannot write model input " + name);
+            }
+        }
+        if (!lm_.model->Run(sig->index, sig->inputs, sig->outputs)) {
+            throw std::runtime_error("LiteRT inference failed");
+        }
+
+        size_t out_count = 1;
+        for (auto d : sig->out_shape) out_count *= static_cast<size_t>(d);
+        std::vector<float> logit_buf(out_count);
+        if (!sig->outputs[0].Read<float>(litert::Span<float>(logit_buf.data(), logit_buf.size()))) {
+            throw std::runtime_error(
+                "cannot read float32 logits (fp16/quantized-output exports are not supported)");
+        }
+        const float* logits = logit_buf.data();
+        const std::vector<int64_t>& out_shape = sig->out_shape;
+        const size_t num_labels = manifest_.id2label.size();
+
+        // Guard against a model/manifest mismatch before indexing the buffer.
+        if (out_shape.empty() || out_shape.back() < 0 ||
+            static_cast<size_t>(out_shape.back()) != num_labels) {
+            throw std::runtime_error(
+                "model output last dimension (" +
+                std::to_string(out_shape.empty() ? -1 : out_shape.back()) +
+                ") does not match manifest id2label size (" + std::to_string(num_labels) + ")");
+        }
+
+        std::map<std::string, float> scores;
+        if (manifest_.task == "token-classification") {
+            // out_shape = [1, tokens, labels]; aggregate per-label across
+            // tokens per the manifest (a routing-friendly presence signal).
+            if (out_shape.size() < 3) {
+                throw std::runtime_error("token-classification model must output [batch, tokens, labels]");
+            }
+            // Only real positions: the padded tail has no counterpart in the reference.
+            const size_t tokens = std::min(static_cast<size_t>(out_shape[out_shape.size() - 2]),
+                                           input_ids.size());
+            const bool mean = manifest_.token_aggregation == "mean";
+            std::vector<double> agg(num_labels, 0.0);
+            size_t counted = 0;
+            for (size_t t = 0; t < tokens; ++t) {
+                // Skip [CLS]/[SEP]/… : the HuggingFace pipeline filters those
+                // positions out of its output, so scoring them would invent
+                // entities the reference never reports.
+                if (t < input_ids.size() && special_ids_.count(input_ids[t])) continue;
+                ++counted;
+                auto p = normalize(logits + t * num_labels, num_labels, manifest_.score_normalization);
+                for (size_t l = 0; l < num_labels; ++l) {
+                    if (mean) agg[l] += p[l];
+                    else agg[l] = std::max(agg[l], static_cast<double>(p[l]));
+                }
+            }
+            if (counted == 0) {
+                throw InvalidInput("input has no content tokens to classify "
+                                   "(it tokenizes to special tokens only)");
+            }
+            for (size_t l = 0; l < num_labels; ++l) {
+                scores[manifest_.id2label[l]] =
+                    static_cast<float>(mean ? agg[l] / counted : agg[l]);
+            }
+        } else {
+            // sequence-classification: normalize the label logits.
+            if (out_shape.size() > 2) {
+                throw std::runtime_error(
+                    "text-classification model must output [batch, labels]; got a rank-" +
+                    std::to_string(out_shape.size()) + " tensor (token-classification model?)");
+            }
+            auto p = normalize(logits, num_labels, manifest_.score_normalization);
+            for (size_t l = 0; l < num_labels; ++l) scores[manifest_.id2label[l]] = p[l];
+        }
+
+        std::vector<std::pair<std::string, float>> ranked(scores.begin(), scores.end());
+        std::sort(ranked.begin(), ranked.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        if (top_k > 0 && static_cast<size_t>(top_k) < ranked.size()) ranked.resize(top_k);
+
+        json labels = json::object();
+        for (auto& [label, score] : ranked) labels[label] = score;
+        return json{{"labels", labels}};
+    }
+
+private:
+    CompiledLiteRt lm_;
+    struct Signature {
+        size_t index = 0;
+        size_t len = 0;
+        std::vector<std::string> input_names;
+        std::vector<litert::TensorBuffer> inputs;
+        std::vector<litert::TensorBuffer> outputs;
+        std::vector<int64_t> out_shape;
+    };
+    std::vector<Signature> signatures_;
+    std::mutex run_mutex_;
+    TokenizerHandle tokenizer_ = nullptr;
+    int64_t pad_id_ = -1;  // >= 0 when tokenizer.json enables padding
+    std::set<int64_t> special_ids_;
+    std::mutex tokenizer_mutex_;
+    Manifest manifest_;
+};
+
+}  // namespace
+
+struct TextModel::Impl {
+    Impl(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
+        : model(dir, threads, weight_cache, verbose) {}
+    Model model;
+};
+
+TextModel::TextModel(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
+    : impl_(std::make_unique<Impl>(dir, threads, weight_cache, verbose)) {}
+
+TextModel::~TextModel() = default;
+
+json TextModel::classify(const std::string& text, int top_k) { return impl_->model.classify(text, top_k); }
+
+const std::string& TextModel::task() const { return impl_->model.task(); }
