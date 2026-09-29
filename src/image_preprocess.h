@@ -33,6 +33,8 @@ struct DecodeLimits {
     // it by doubling), plus a fixed slack.
     uint64_t budget_factor = 16;
     uint64_t budget_slack = 4u << 20;
+    // Absolute ceiling on that budget, whatever the factor and pixel cap say.
+    uint64_t max_budget = 256u << 20;
 };
 
 enum class DecodeError {

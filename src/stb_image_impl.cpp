@@ -74,20 +74,20 @@ static void budget_free(void* p) {
     std::free(static_cast<unsigned char*>(p) - kHeader);
 }
 
-// Accounting uses the net size change: large blocks are mmap-backed in both
-// glibc and musl, so realloc remaps them rather than holding two copies.
+// Charged as old + new: realloc may copy (glibc's dynamic mmap threshold puts
+// later large blocks on the brk heap), so both blocks can be live at once.
 static void* budget_realloc(void* p, size_t n) {
     if (!p) return budget_malloc(n);
     if (n > SIZE_MAX - kHeader) return nullptr;
     const size_t old = block_size(p);
-    const uint64_t base_used = t_budget.used - std::min<uint64_t>(t_budget.used, old);
-    const uint64_t new_used = base_used + n;
-    if (!admit(new_used)) return nullptr;
+    const uint64_t transient = t_budget.used + n;
+    if (!admit(transient)) return nullptr;
     auto* base = static_cast<unsigned char*>(
         std::realloc(static_cast<unsigned char*>(p) - kHeader, n + kHeader));
     if (!base) return nullptr;
     std::memcpy(base, &n, sizeof(n));
-    account(new_used);
+    account(transient);
+    if (t_budget.active) t_budget.used = transient - std::min<uint64_t>(transient, old);
     return base + kHeader;
 }
 

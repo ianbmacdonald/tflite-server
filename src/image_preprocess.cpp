@@ -30,37 +30,33 @@ bool strict_base64_decode(std::string_view in, std::string& out) {
         if (c == '/') return 63;
         return -1;
     };
-    std::string clean;
-    clean.reserve(in.size());
+    out.clear();
+    out.reserve(in.size() / 4 * 3);
+    uint32_t quad[4];
+    size_t n = 0;
+    size_t pad = 0;
+    bool finished = false;
     for (unsigned char c : in) {
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') continue;
-        clean.push_back(static_cast<char>(c));
-    }
-    if (clean.empty() || clean.size() % 4 != 0) return false;
-    size_t pad = 0;
-    if (clean.back() == '=') pad = (clean[clean.size() - 2] == '=') ? 2 : 1;
-    out.clear();
-    out.reserve(clean.size() / 4 * 3);
-    for (size_t i = 0; i < clean.size(); i += 4) {
-        const bool last = i + 4 == clean.size();
-        int v[4];
-        for (size_t k = 0; k < 4; ++k) {
-            const unsigned char c = static_cast<unsigned char>(clean[i + k]);
-            if (c == '=') {
-                if (!last || k < 4 - pad) return false;
-                v[k] = 0;
-            } else {
-                v[k] = value(c);
-                if (v[k] < 0) return false;
-            }
+        if (finished) return false;
+        if (c == '=') {
+            if (n < 2) return false;
+            ++pad;
+            quad[n++] = 0;
+        } else {
+            const int v = value(c);
+            if (v < 0 || pad) return false;
+            quad[n++] = static_cast<uint32_t>(v);
         }
-        const uint32_t n = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) |
-                           (uint32_t(v[2]) << 6) | uint32_t(v[3]);
-        out.push_back(static_cast<char>((n >> 16) & 0xFF));
-        if (!last || pad < 2) out.push_back(static_cast<char>((n >> 8) & 0xFF));
-        if (!last || pad < 1) out.push_back(static_cast<char>(n & 0xFF));
+        if (n < 4) continue;
+        const uint32_t x = (quad[0] << 18) | (quad[1] << 12) | (quad[2] << 6) | quad[3];
+        out.push_back(static_cast<char>((x >> 16) & 0xFF));
+        if (pad < 2) out.push_back(static_cast<char>((x >> 8) & 0xFF));
+        if (pad < 1) out.push_back(static_cast<char>(x & 0xFF));
+        n = 0;
+        finished = pad > 0;
     }
-    return true;
+    return n == 0 && !out.empty();
 }
 
 namespace {
@@ -112,6 +108,7 @@ DecodeResult decode_rgb8(std::string_view bytes, const DecodeLimits& limits) {
 
     r.budget_limit = limits.budget_factor * pixels + limits.budget_slack +
                      (fmt == ImageFormat::Png ? 2 * static_cast<uint64_t>(bytes.size()) : 0);
+    r.budget_limit = std::min(r.budget_limit, limits.max_budget);
     stb_budget::DecodeBudgetScope budget(r.budget_limit);
     int x = 0, y = 0, n = 0;
     unsigned char* px = stbi_load_from_memory(data, len, &x, &y, &n, 3);

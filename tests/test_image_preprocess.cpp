@@ -82,6 +82,10 @@ void test_sniff_and_base64() {
     CHECK(!imgproc::strict_base64_decode("a===", out), "three pad chars");
     CHECK(!imgproc::strict_base64_decode("", out), "empty");
     CHECK(!imgproc::strict_base64_decode("aGVsbG8=aGVs", out), "data after padding");
+    CHECK(!imgproc::strict_base64_decode("aGVsbA===", out), "extra pad char after a full group");
+    CHECK(!imgproc::strict_base64_decode("aGVsbA=", out), "short final group");
+    CHECK(!imgproc::strict_base64_decode("  \n ", out), "whitespace only");
+    CHECK(imgproc::strict_base64_decode(" a G V s b A = = ", out) && out == "hell", "spaces inside the padding");
 }
 
 void test_decode_variants() {
@@ -195,6 +199,21 @@ void test_zip_bomb() {
     CHECK(ok.error == imgproc::DecodeError::None, "well-formed generator PNG: %s", ok.message.c_str());
 }
 
+void test_budget_ceiling() {
+    imgproc::DecodeLimits lim;
+    lim.budget_factor = 64;
+    lim.max_budget = 256 * 1024;
+    auto r = imgproc::decode_rgb8(read_file("synth_600x512.png"), lim);
+    CHECK(r.budget_limit == lim.max_budget, "limit %llu, want the ceiling %llu",
+          (unsigned long long)r.budget_limit, (unsigned long long)lim.max_budget);
+    CHECK(r.error == imgproc::DecodeError::BudgetExceeded, "600x512 under a 256 KiB ceiling: %s",
+          r.message.c_str());
+    CHECK(r.budget_peak <= lim.max_budget, "peak %llu over the ceiling", (unsigned long long)r.budget_peak);
+    auto ok = imgproc::decode_rgb8(read_file("synth_600x512.png"), imgproc::DecodeLimits{});
+    CHECK(ok.error == imgproc::DecodeError::None && ok.budget_limit < imgproc::DecodeLimits{}.max_budget,
+          "default ceiling must not bind on 600x512: %s", ok.message.c_str());
+}
+
 void test_budget_fits_worst_case_jpeg() {
     imgproc::DecodeLimits lim;
     lim.budget_slack = 64 * 1024;  // so the per-pixel factor alone has to cover the decode
@@ -305,6 +324,8 @@ int main(int argc, char** argv) {
     test_rejects();
     std::printf("zip bomb\n");
     test_zip_bomb();
+    std::printf("budget ceiling\n");
+    test_budget_ceiling();
     std::printf("budget on worst-case JPEGs\n");
     test_budget_fits_worst_case_jpeg();
     std::printf("resampler invariants\n");

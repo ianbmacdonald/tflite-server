@@ -23,6 +23,7 @@ find_package(Threads REQUIRED)
 
 # Decode, resize and manifest parsing: no LiteRT, so the tests build anywhere.
 add_library(tflite_image STATIC
+  src/flat_json.cpp
   src/image_manifest.cpp
   src/image_preprocess.cpp
   src/stb_image_impl.cpp)
@@ -35,12 +36,15 @@ if(TFLITE_SERVER_PREPROCESS_TESTS)
   target_link_libraries(test_image_preprocess PRIVATE tflite_image Threads::Threads)
   add_executable(test_image_manifest tests/test_image_manifest.cpp)
   target_link_libraries(test_image_manifest PRIVATE tflite_image)
+  add_executable(test_flat_json tests/test_flat_json.cpp)
+  target_link_libraries(test_flat_json PRIVATE tflite_image)
   add_executable(fuzz_image_decode tests/fuzz_image_decode.cpp)
   target_link_libraries(fuzz_image_decode PRIVATE tflite_image)
   add_test(NAME image_preprocess
     COMMAND test_image_preprocess "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   add_test(NAME image_manifest
     COMMAND test_image_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+  add_test(NAME flat_json COMMAND test_flat_json)
   add_test(NAME image_decode_fuzz_smoke
     COMMAND fuzz_image_decode "${CMAKE_CURRENT_SOURCE_DIR}/tests/data" 2000)
 endif()
@@ -83,6 +87,7 @@ add_executable(tflite-server
   src/image_model.cpp
   src/litert_engine.cpp
   src/text_model.cpp)
+target_compile_definitions(tflite-server PRIVATE TFLITE_SERVER_VERSION="${PROJECT_VERSION}")
 # LiteRT's C++ headers reuse type names as member names (Span, ElementType), which
 # GCC rejects by default; LiteRT's own CMake build compiles with -fpermissive too.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

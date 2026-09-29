@@ -8,12 +8,15 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "counting_semaphore.h"
 #include "errors.h"
+#include "flat_json.h"
 #include "image_model.h"
 #include "image_preprocess.h"
 #include "text_model.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -28,8 +31,9 @@ using json = nlohmann::json;
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = TFLITE_SERVER_VERSION;
 constexpr long long kMaxTopK = 1000000;
+constexpr auto kAdmissionWait = std::chrono::seconds(30);
 
 struct Args {
     std::string model_path;
@@ -40,6 +44,7 @@ struct Args {
     uint64_t max_image_bytes = 16u << 20;
     uint64_t max_image_pixels = 4000000;
     uint64_t decode_budget_factor = 16;
+    uint64_t max_decode_bytes = 256u << 20;
     int max_concurrent_decodes = 1;
     int http_threads = 4;
     int oom_score_adj = 0;  // 0: leave unchanged
@@ -48,7 +53,7 @@ struct Args {
 const char* kUsage =
     "usage: tflite-server --model-path <dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]\n"
     "  image models: [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]\n"
-    "                [--decode-budget-factor N]\n"
+    "                [--decode-budget-factor N] [--max-decode-bytes N]\n"
     "  all models:   [--http-threads 2..16] [--oom-score-adj 0..1000]";
 
 long long parse_int(const std::string& flag, const char* v) {
@@ -76,6 +81,7 @@ Args parse_args(int argc, char** argv) {
         else if (f == "--max-image-bytes" && has_value) a.max_image_bytes = parse_int(f, argv[++i]);
         else if (f == "--max-image-pixels" && has_value) a.max_image_pixels = parse_int(f, argv[++i]);
         else if (f == "--decode-budget-factor" && has_value) a.decode_budget_factor = parse_int(f, argv[++i]);
+        else if (f == "--max-decode-bytes" && has_value) a.max_decode_bytes = parse_int(f, argv[++i]);
         else if (f == "--max-concurrent-decodes" && has_value) {
             a.max_concurrent_decodes = static_cast<int>(parse_int(f, argv[++i]));
         } else if (f == "--http-threads" && has_value) {
@@ -93,6 +99,9 @@ Args parse_args(int argc, char** argv) {
     }
     if (a.decode_budget_factor < 4 || a.decode_budget_factor > 64) {
         throw std::runtime_error("--decode-budget-factor must be from 4 to 64");
+    }
+    if (a.max_decode_bytes < (16ull << 20) || a.max_decode_bytes > (4ull << 30)) {
+        throw std::runtime_error("--max-decode-bytes must be from 16777216 to 4294967296");
     }
     if (a.max_concurrent_decodes < 1 || a.max_concurrent_decodes > 2) {
         const int clamped = std::clamp(a.max_concurrent_decodes, 1, 2);
@@ -123,15 +132,23 @@ void apply_oom_score_adj(int value) {
 #endif
 }
 
+// "" when the directory has no manifest.json (a text model). A manifest that
+// exists but cannot be read is a startup error, not a silent text fallback.
 std::string manifest_task(const fs::path& dir) {
-    std::ifstream f(dir / "manifest.json");
-    if (!f) return "";
+    const fs::path file = dir / "manifest.json";
+    std::error_code ec;
+    if (!fs::exists(file, ec)) return "";
+    const auto size = fs::file_size(file, ec);
+    if (ec) throw std::runtime_error("cannot read " + file.string());
+    if (size > (1u << 20)) throw std::runtime_error(file.string() + " is larger than 1 MiB");
+    std::ifstream f(file, std::ios::binary);
+    json j;
     try {
-        json j;
         f >> j;
-        if (j.is_object() && j.contains("task") && j["task"].is_string()) return j["task"].get<std::string>();
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        throw std::runtime_error(file.string() + " is not valid JSON: " + e.what());
     }
+    if (j.is_object() && j.contains("task") && j["task"].is_string()) return j["task"].get<std::string>();
     return "";
 }
 
@@ -155,51 +172,128 @@ int top_k_from_field(const std::string& s) {
     return top_k_from_json(json(std::stoll(s)));
 }
 
+uint64_t content_length(const httplib::Request& req) {
+    return req.has_header("Content-Length") ? req.get_header_value_u64("Content-Length") : 0;
+}
+
+void drain(const httplib::Request& req, const httplib::ContentReader& reader) {
+    if (req.is_multipart_form_data()) {
+        reader([](const httplib::MultipartFormData&) { return true; }, [](const char*, size_t) { return true; });
+    } else {
+        reader([](const char*, size_t) { return true; });
+    }
+}
+
+// Reads the body through httplib's ContentReader, so nothing is buffered
+// before the handler has an admission slot. Receivers never abort: an
+// oversize or unwanted part is discarded while the stream is still read to
+// its end, which keeps the connection usable.
+//
 // Multipart: exactly one file part named "image" or "file", plus an optional
 // "top_k" field. JSON: {"image": "<base64 or data:image/(jpeg|png);base64,...>", "top_k": k}.
-void parse_image_request(const httplib::Request& req, std::string& bytes, int& top_k) {
+void read_image_request(const httplib::Request& req, const httplib::Response& res,
+                        const httplib::ContentReader& reader, uint64_t max_image_bytes, uint64_t max_body_bytes, std::string& bytes, int& top_k) {
     top_k = 0;
+    bytes.clear();
+    bool too_large = false;
+    bool ok = false;
     if (req.is_multipart_form_data()) {
-        const httplib::MultipartFormData* part = nullptr;
-        size_t parts = 0;
-        for (const auto& [name, f] : req.files) {
-            if (name == "image" || name == "file") {
-                ++parts;
-                part = &f;
-            } else if (name == "top_k") {
-                top_k = top_k_from_field(f.content);
-            }
+        enum class Part { Image, TopK, Other } cur = Part::Other;
+        size_t image_parts = 0;
+        std::string top_k_field;
+        bool has_top_k = false;
+        ok = reader(
+            [&](const httplib::MultipartFormData& f) {
+                if (f.name == "image" || f.name == "file") {
+                    cur = ++image_parts == 1 && !too_large ? Part::Image : Part::Other;
+                } else if (f.name == "top_k") {
+                    cur = Part::TopK;
+                    has_top_k = true;
+                    top_k_field.clear();
+                } else {
+                    cur = Part::Other;
+                }
+                return true;
+            },
+            [&](const char* d, size_t n) {
+                if (cur == Part::Image) {
+                    if (bytes.size() + n > max_image_bytes) {
+                        too_large = true;
+                        cur = Part::Other;
+                        std::string().swap(bytes);
+                    } else {
+                        bytes.append(d, n);
+                    }
+                } else if (cur == Part::TopK && top_k_field.size() < 16) {
+                    top_k_field.append(d, std::min<size_t>(n, 16));
+                }
+                return true;
+            });
+        if (ok && too_large) {
+            throw PayloadTooLarge("image is larger than the " + std::to_string(max_image_bytes) + " byte limit");
         }
-        if (parts != 1) throw InvalidInput("exactly one image part ('image' or 'file') required");
-        bytes = part->content;
-        return;
-    }
-    json body;
-    try {
-        body = json::parse(req.body);
-    } catch (const std::exception&) {
-        throw InvalidInput("request body must be multipart/form-data or JSON");
-    }
-    if (!body.is_object() || !body.contains("image") || !body["image"].is_string()) {
-        throw InvalidInput("'image' (a base64 string) is required");
-    }
-    if (body.contains("top_k")) top_k = top_k_from_json(body["top_k"]);
-    std::string_view s = body["image"].get_ref<const std::string&>();
-    if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0) {
-        throw InvalidInput("remote image URLs are not supported; send base64 or a data: URL");
-    }
-    if (s.rfind("data:", 0) == 0) {
-        bool ok = false;
-        for (std::string_view prefix : {"data:image/jpeg;base64,", "data:image/png;base64,"}) {
-            if (s.rfind(prefix, 0) == 0) {
-                s.remove_prefix(prefix.size());
-                ok = true;
-                break;
-            }
+        if (ok) {
+            if (image_parts != 1) throw InvalidInput("exactly one image part ('image' or 'file') required");
+            if (has_top_k) top_k = top_k_from_field(top_k_field);
+            return;
         }
-        if (!ok) throw InvalidInput("data URLs must be data:image/jpeg;base64 or data:image/png;base64");
+    } else {
+        std::string body;
+        const uint64_t declared = content_length(req);
+        if (declared <= max_body_bytes) body.reserve(static_cast<size_t>(declared));
+        ok = reader([&](const char* d, size_t n) {
+            if (too_large) return true;
+            if (body.size() + n > max_body_bytes) {
+                too_large = true;
+                std::string().swap(body);
+            } else {
+                body.append(d, n);
+            }
+            return true;
+        });
+        if (ok && too_large) {
+            throw PayloadTooLarge("request body is over the " + std::to_string(max_body_bytes) + " byte limit");
+        }
+        if (ok) {
+            json obj;
+            std::string error;
+            if (!parse_flat_json_object(body, obj, error)) {
+                if (error == "request body is not valid JSON") error += " (send multipart/form-data or a JSON object)";
+                throw InvalidInput(error);
+            }
+            std::string().swap(body);
+            if (!obj.contains("image") || !obj["image"].is_string()) {
+                throw InvalidInput("'image' (a base64 string) is required");
+            }
+            if (obj.contains("top_k")) top_k = top_k_from_json(obj["top_k"]);
+            std::string image = std::move(obj["image"].get_ref<std::string&>());
+            obj = json();
+            std::string_view s = image;
+            if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0) {
+                throw InvalidInput("remote image URLs are not supported; send base64 or a data: URL");
+            }
+            if (s.rfind("data:", 0) == 0) {
+                bool prefix_ok = false;
+                for (std::string_view prefix : {"data:image/jpeg;base64,", "data:image/png;base64,"}) {
+                    if (s.rfind(prefix, 0) == 0) {
+                        s.remove_prefix(prefix.size());
+                        prefix_ok = true;
+                        break;
+                    }
+                }
+                if (!prefix_ok) throw InvalidInput("data URLs must be data:image/jpeg;base64 or data:image/png;base64");
+            }
+            if (!imgproc::strict_base64_decode(s, bytes)) throw InvalidInput("'image' is not valid base64");
+            return;
+        }
     }
-    if (!imgproc::strict_base64_decode(s, bytes)) throw InvalidInput("'image' is not valid base64");
+    std::string().swap(bytes);
+    // A failed read has set res.status: 413 for a Content-Length over the
+    // payload limit, 400 for a malformed or truncated body.
+    if (res.status == 413) {
+        throw PayloadTooLarge("request body is over the " + std::to_string(max_body_bytes) + " byte limit");
+    }
+    throw InvalidInput("cannot read the request body (malformed multipart or truncated)");
 }
 
 }  // namespace
@@ -217,6 +311,7 @@ int main(int argc, char** argv) {
             opts.max_image_bytes = args.max_image_bytes;
             opts.limits.max_pixels = args.max_image_pixels;
             opts.limits.budget_factor = args.decode_budget_factor;
+            opts.limits.max_budget = args.max_decode_bytes;
             opts.max_concurrent_decodes = args.max_concurrent_decodes;
             image = std::make_unique<ImageModel>(args.model_path, args.threads, args.weight_cache, opts,
                                                  args.verbose);
@@ -231,7 +326,29 @@ int main(int argc, char** argv) {
         const size_t http_threads = static_cast<size_t>(args.http_threads);
         srv.new_task_queue = [http_threads] { return new httplib::ThreadPool(http_threads); };
         // Base64 inflates by 4/3; 64 KiB covers multipart headers and the JSON wrapper.
-        srv.set_payload_max_length(static_cast<size_t>(args.max_image_bytes * 4 / 3 + (64u << 10)));
+        const uint64_t max_body_bytes = args.max_image_bytes * 4 / 3 + (64u << 10);
+        srv.set_payload_max_length(static_cast<size_t>(max_body_bytes));
+        // Image requests read their body only after taking one of these, so
+        // http_threads bounds waiting connections, not buffered bodies. One
+        // more than the decode slots lets the next body arrive during a decode.
+        CountingSemaphore admission(args.max_concurrent_decodes + 1);
+        const uint64_t decode_budget = std::min<uint64_t>(
+            args.decode_budget_factor * args.max_image_pixels + (4u << 20) + 2 * args.max_image_bytes,
+            args.max_decode_bytes);
+        if (image && args.verbose) {
+            const uint64_t per_request = max_body_bytes + args.max_image_bytes * 2;
+            std::fprintf(stderr,
+                         "tflite-server: request memory bound ~%llu MiB (%d admitted x %llu MiB body and copies) "
+                         "+ %d decode(s) x <= %llu MiB budget\n",
+                         (unsigned long long)(per_request * (args.max_concurrent_decodes + 1) >> 20),
+                         args.max_concurrent_decodes + 1, (unsigned long long)(per_request >> 20),
+                         args.max_concurrent_decodes, (unsigned long long)(decode_budget >> 20));
+        }
+        if (image && args.decode_budget_factor * args.max_image_pixels + (4u << 20) > args.max_decode_bytes) {
+            std::fprintf(stderr,
+                         "tflite-server: warning: --decode-budget-factor x --max-image-pixels exceeds "
+                         "--max-decode-bytes; images near the pixel cap may fail the decode budget\n");
+        }
 
         srv.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
             res.set_content(json{{"status", "ok"}, {"engine", "litert"}, {"task", task}, {"version", kVersion}}.dump(),
@@ -245,7 +362,9 @@ int main(int argc, char** argv) {
             std::string input;
             int top_k = 0;
             try {
-                json body = json::parse(req.body);
+                json body;
+                std::string error;
+                if (!parse_flat_json_object(req.body, body, error)) throw InvalidInput(error);
                 input = body.contains("text") ? body.at("text").get<std::string>()
                                               : body.at("input").get<std::string>();
                 top_k = body.value("top_k", 0);
@@ -261,15 +380,28 @@ int main(int argc, char** argv) {
                 send_error(res, 500, e.what());
             }
         });
-        srv.Post("/classify/image", [&](const httplib::Request& req, httplib::Response& res) {
+        srv.Post("/classify/image", [&](const httplib::Request& req, httplib::Response& res,
+                                        const httplib::ContentReader& reader) {
             if (!image) {
+                drain(req, reader);
                 send_error(res, 400, "this server hosts a text model; POST /classify");
                 return;
             }
+            if (content_length(req) > max_body_bytes) {
+                drain(req, reader);
+                send_error(res, 413, "request body is over the " + std::to_string(max_body_bytes) + " byte limit");
+                return;
+            }
+            if (!admission.acquire_for(kAdmissionWait)) {
+                drain(req, reader);
+                send_error(res, 503, "busy: no request slot became free within 30 s");
+                return;
+            }
+            SlotGuard slot(admission);
             try {
                 std::string bytes;
                 int top_k = 0;
-                parse_image_request(req, bytes, top_k);
+                read_image_request(req, res, reader, args.max_image_bytes, max_body_bytes, bytes, top_k);
                 res.set_content(image->classify(bytes, top_k).dump(), "application/json");
             } catch (const InvalidInput& e) {
                 send_error(res, 400, e.what());

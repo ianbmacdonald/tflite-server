@@ -167,6 +167,10 @@ def main():
         "truncated PNG": post_image(port, png(64, 64)[:60]),
         "PNG with a valid signature and garbage": post_image(port, b"\x89PNG\r\n\x1a\n" + bytes(200)),
         "truncated JPEG header": post_image(port, gh[:200]),
+        "JSON top-level array": post_json(port, [b64]),
+        "JSON nested object": post_json(port, {"image": b64, "options": {"a": 1}}),
+        "JSON duplicate image key": request(port, "POST", "/classify/image", b'{"image":"aGVsbG8=","image":"aGVsbG8="}',
+                                            {"Content-Type": "application/json"}),
     }
     for what, (status, body) in cases.items():
         detail = body.get("error", "") if isinstance(body, dict) else str(body)[:100]
@@ -183,10 +187,28 @@ def main():
     check(status == 400 and body.get("error") == "image decode exceeded memory budget",
           f"PNG zip bomb ({len(bomb)} bytes, inflates to 272 MiB) -> 400", str(body))
 
-    status, body = post_image(port, bytes(20 * 1000 * 1000))
-    check(status == 413, "20 MB image part -> 413", f"{status} {body if isinstance(body, dict) else ''}")
+    nested = b"[" * (21 << 19) + b"]" * (21 << 19)
+    status, body = request(port, "POST", "/classify/image", nested, {"Content-Type": "application/json"})
+    check(status == 400 and "must be a JSON object" in body.get("error", ""),
+          "21 MiB of nested JSON arrays -> 400", f"{status} {body}")
+
+    # 20 MB is under the derived payload limit (16 MiB * 4/3 + 64 KiB, about
+    # 22.4 MB), so it reaches the image-size check; 30 MB is over the limit and
+    # is refused from Content-Length before the body is read.
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=300)
+    body, headers = multipart([("image", bytes(20 * 1000 * 1000), "x.bin")])
+    c.request("POST", "/classify/image", body, headers)
+    r = c.getresponse()
+    status, data = r.status, r.read()
+    check(status == 413 and b"byte limit" in data, "20 MB image part -> 413 (image-size limit)", f"{status} {data[:200]}")
+    body, headers = multipart([("image", gh, "x.jpg")])
+    c.request("POST", "/classify/image", body, headers)
+    r = c.getresponse()
+    status, data = r.status, r.read()
+    check(status == 200, "same keep-alive connection still serves after the 413", f"{status} {data[:200]}")
+    c.close()
     line = oversize_raw(port, 30 * 1000 * 1000)
-    check(" 413 " in line, "30 MB body over the payload limit -> 413 from httplib", line)
+    check(" 413 " in line, "30 MB body over the payload limit -> 413 before the body is read", line)
 
     status, health = request(port, "GET", "/health")
     status2, body = post_image(port, gh)

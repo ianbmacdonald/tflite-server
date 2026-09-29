@@ -84,7 +84,8 @@ builds the directory for TF MobileNetV2 1.0 224 fp32 (`mobilenet_v2_1.0_224.tfli
 ```bash
 tflite-server --model-path <model-dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]
               [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]
-              [--decode-budget-factor N] [--http-threads 2..16] [--oom-score-adj 0..1000]
+              [--decode-budget-factor N] [--max-decode-bytes N] [--http-threads 2..16]
+              [--oom-score-adj 0..1000]
 ```
 
 - `--threads N`: number of CPU threads (default: one per hardware thread).
@@ -93,7 +94,9 @@ tflite-server --model-path <model-dir> --port <n> [--threads N] [--weight-cache 
   mapped from disk and shared by all signatures. The file is written on first start (about 170 MB
   for DistilBERT) and must live on persistent, writable storage.
 - `--max-image-bytes N` (default 16777216): a larger image is a 413. The HTTP body limit is
-  set from it (N x 4/3 + 64 KiB, for base64), so a larger upload is refused with 413 as it arrives.
+  set from it (N x 4/3 + 64 KiB, for base64, about 22.4 MB by default). A body whose
+  Content-Length is over that limit is refused with 413 before it is read; an image part over N
+  is discarded as it arrives and answered with 413.
 - `--max-image-pixels N` (default 4000000): read from the image header before any decode.
 - `--max-concurrent-decodes N` (default 1, clamped to 1..2): decode slots. A request waits up
   to 30 s for one, then gets 503. The decoded image is freed before inference.
@@ -101,8 +104,13 @@ tflite-server --model-path <model-dir> --port <n> [--threads N] [--weight-cache 
   N x width x height bytes, plus twice the input size for PNG, plus 4 MiB. The worst legitimate
   case, a progressive 4-component JPEG, peaks at about 15 bytes per pixel. A PNG whose zlib
   stream inflates past its header's size (a "zip bomb") fails with 400
-  `image decode exceeded memory budget` instead of growing without bound.
-- `--http-threads N` (default 4): HTTP worker threads.
+  `image decode exceeded memory budget` instead of growing without bound. A realloc is charged
+  as old + new size, because it may copy.
+- `--max-decode-bytes N` (default 268435456, 16 MiB..4 GiB): a ceiling on that budget. At
+  startup, a factor x pixel cap that exceeds it prints a warning.
+- `--http-threads N` (default 4): HTTP worker threads. An image request reads its body only
+  after it takes one of `max-concurrent-decodes + 1` request slots (waiting up to 30 s, then
+  503), so extra threads hold waiting connections, not buffered bodies.
 - `--oom-score-adj N` (default 0, unchanged): Linux only. Raising it needs no privilege and
   makes this process the OOM killer's first choice over the processes it shares a host with.
 
@@ -147,6 +155,14 @@ Endpoints:
   applied, as in the Pillow reference.
 
 It binds 127.0.0.1 only. Lemonade reaches it as a local subprocess.
+
+Memory envelope for image requests, beyond the model: each admitted request holds at most
+its body plus one decoded copy. That is about 2.7 x `--max-image-bytes` for base64 JSON (the
+body, the image string, then the decoded bytes) and 1 x for multipart (the image part is
+the only copy). With the defaults that is 2 slots x ~45 MB, plus one decode under a budget
+of at most `--max-decode-bytes` (about 68 MB at the 4 MP default). JSON bodies must be one flat
+object of at most 32 scalar keys; nesting is refused at the first nested bracket, so a
+hostile body never becomes a DOM. `--verbose` prints the bound at startup.
 
 ## Measured
 
@@ -206,9 +222,13 @@ tolerance), byte-identical resizing against Pillow goldens, the 12-bit and arith
 rejections, the pixel cap, a generated PNG zip bomb, the decode budget on worst-case JPEGs,
 and the whole pipeline on a thread with a 128 KiB stack (musl's default).
 `tests/fuzz_image_decode <tests/data> 10000` is a mutation smoke; build it with
-`-fsanitize=address,undefined`. `tools/make_preprocess_goldens.py` regenerates `tests/data`.
+`-fsanitize=address,undefined`. `tests/test_flat_json` covers the request JSON parser and
+checks that 21 MiB hostile bodies (nested arrays, a flat array, thousands of keys) add under
+4 MiB of peak RSS. `tools/make_preprocess_goldens.py` regenerates `tests/data`.
 Against a running server: `tests/e2e_image_server.py`, `tests/load_image_server.py` and
-`tools/compare_image_with_litert.py`.
+`tools/compare_image_with_litert.py`. The e2e script checks both 413 paths: a 20 MB image part
+is under the derived body limit (about 22.4 MB) and gets the image-size 413 on a connection
+that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length.
 
 ## License
 

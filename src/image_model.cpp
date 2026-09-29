@@ -1,5 +1,6 @@
 #include "image_model.h"
 
+#include "counting_semaphore.h"
 #include "errors.h"
 #include "image_manifest.h"
 #include "litert_engine.h"
@@ -11,7 +12,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <numeric>
@@ -22,40 +22,6 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-
-class CountingSemaphore {
-public:
-    explicit CountingSemaphore(int slots) : free_(slots) {}
-    bool acquire_for(std::chrono::milliseconds wait) {
-        std::unique_lock<std::mutex> lock(m_);
-        if (!cv_.wait_for(lock, wait, [&] { return free_ > 0; })) return false;
-        --free_;
-        return true;
-    }
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            ++free_;
-        }
-        cv_.notify_one();
-    }
-
-private:
-    std::mutex m_;
-    std::condition_variable cv_;
-    int free_;
-};
-
-class SlotGuard {
-public:
-    explicit SlotGuard(CountingSemaphore& s) : s_(s) {}
-    ~SlotGuard() { s_.release(); }
-    SlotGuard(const SlotGuard&) = delete;
-    SlotGuard& operator=(const SlotGuard&) = delete;
-
-private:
-    CountingSemaphore& s_;
-};
 
 constexpr auto kSlotWait = std::chrono::seconds(30);
 
