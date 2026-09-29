@@ -180,6 +180,11 @@ TF MobileNetV2 1.0 224 fp32, musl build under the prplOS 5.1 loader on a Ryzen A
   8 sending a 272 MiB PNG zip bomb, 50 requests each: every image answered correctly, every
   bomb got 400, `/health` kept answering, VmHWM 78 MiB. 100 sequential `grace_hopper`
   requests after that: inference 2.0 ms median, VmRSS flat at 46 MiB.
+- Same limits, 12 clients at once sending bodies at the payload limit (a 16 MiB JPEG as
+  multipart, the same as 21 MiB of base64 JSON, and 21 MiB of nested JSON arrays), 3 each:
+  every image answered, every nested body got 400, VmHWM 119 MiB. The v0.2.0 draft, which
+  buffered every body and parsed JSON into a DOM, was OOM-killed at `MemoryMax=2G` by the
+  same run.
 
 ### Text classification
 
