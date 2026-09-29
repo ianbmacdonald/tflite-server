@@ -1,13 +1,13 @@
 #!/bin/bash
 # Package a tflite-server release tarball from build-prplos-x86_64 (run on the build host).
-# Usage: package-release.sh <version>
+# Usage: package-release.sh <version>   (OUT=<dir> overrides the output directory, default $R/bundle)
 set -euo pipefail
 VER=$1
 R=${R:-$HOME/build-litert}
 SRC=$(cd "$(dirname "$0")" && pwd)
 BLD=$SRC/build-prplos-x86_64
 NAME=tflite-server-musl-x86_64-$VER
-OUT=$R/bundle
+OUT=${OUT:-$R/bundle}
 B=$OUT/$NAME
 T=$R/prplos-5.1-staging/toolchain-x86_64_gcc-13.3.0_musl/bin
 export STAGING_DIR=$R/prplos-5.1-staging
@@ -19,6 +19,7 @@ cp "$R/litert-v220/LICENSE" "$B/licenses/LiteRT-LICENSE"
 cp "$R/tokenizers-cpp/LICENSE" "$B/licenses/tokenizers-cpp-LICENSE"
 cp "$BLD/_deps/httplib-src/LICENSE" "$B/licenses/cpp-httplib-LICENSE"
 cp "$BLD/_deps/json-src/LICENSE.MIT" "$B/licenses/nlohmann-json-LICENSE"
+cp "$SRC/third_party/stb/LICENSE" "$B/licenses/stb-LICENSE"
 ONIG=$(find "$HOME/.cargo/registry/src" -maxdepth 4 -path '*onig_sys*' -name COPYING | head -1)
 [ -n "$ONIG" ] && cp "$ONIG" "$B/licenses/oniguruma-COPYING"
 ( cd "$R/tokenizers-cpp/rust" && "$HOME/.cargo/bin/cargo" metadata --format-version 1 \
