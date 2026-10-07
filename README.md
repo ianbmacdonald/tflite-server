@@ -241,7 +241,9 @@ checks that 21 MiB hostile bodies (nested arrays, a flat array, thousands of key
 Against a running server: `tests/e2e_image_server.py`, `tests/load_image_server.py` and
 `tools/compare_image_with_litert.py`. The e2e script checks both 413 paths: a 20 MB image part
 is under the derived body limit (about 22.4 MB) and gets the image-size 413 on a connection
-that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length.
+that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length. A 30 MB
+chunked body (no Content-Length) also gets 413, and with both request slots held by two slow
+uploads a third request gets 503 after the 30 s admission wait (the check takes about 32 s).
 
 ## Build: curated (default) or general
 
@@ -268,6 +270,11 @@ models of v0.2.0.
 links with `--gc-sections`. It drops the unused parts of the Rust tokenizer library in any case, and
 the unused LiteRT code only if LiteRT itself was compiled with the same two flags, as the release
 LiteRT tree is (`LITERT_BUILD=<that tree> ./build-prplos-x86_64.sh`).
+
+`package-release.sh <version> [x86_64|aarch64]` (with `BLD` and `LITERT_BUILD` pointing at the build and
+LiteRT trees) writes the release archive: the stripped binary, `BUILD-INFO.txt` naming the operator set,
+and in `licenses/` the licence text of every third-party component it links, including one directory per
+Rust crate of the tokenizer shim (`tools/rust_licenses.py`).
 
 ## License
 
