@@ -1,0 +1,17 @@
+# use case image: tflite ops = union over 4 model(s), tools/uc_oplists.py
+# image/effnet_lite0: 8 ops
+# image/mnv3_large: 10 ops
+# image/mnv3_small: 10 ops
+# image/mobilenetv2: 6 ops
+ADD
+AVERAGE_POOL_2D
+CONV_2D
+DEPTHWISE_CONV_2D
+FULLY_CONNECTED
+GATHER_ND
+HARD_SWISH
+MUL
+PAD
+RESHAPE
+SOFTMAX
+SUM

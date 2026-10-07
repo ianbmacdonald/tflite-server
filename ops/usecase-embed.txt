@@ -1,0 +1,25 @@
+# use case embed: tflite ops = union over 2 model(s), tools/uc_oplists.py
+# embed/bge_small: 22 ops
+# embed/minilm_l6: 21 ops
+ABS
+ADD
+BATCH_MATMUL
+BROADCAST_TO
+CAST
+DIV
+EMBEDDING_LOOKUP
+FULLY_CONNECTED
+GELU
+MAXIMUM
+MEAN
+MUL
+RESHAPE
+RSQRT
+SELECT_V2
+SLICE
+SOFTMAX
+SQRT
+SQUARED_DIFFERENCE
+SUB
+SUM
+TRANSPOSE

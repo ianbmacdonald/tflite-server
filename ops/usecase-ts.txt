@@ -1,0 +1,18 @@
+# use case ts: tflite ops = union over 2 model(s), tools/uc_oplists.py
+# ts/conv_ae: 9 ops
+# ts/lstm: 8 ops
+ADD
+CONCATENATION
+CONV_2D
+FULLY_CONNECTED
+LOGISTIC
+MUL
+PAD
+RELU
+RESHAPE
+SLICE
+SUB
+SUM
+TANH
+TRANSPOSE
+TRANSPOSE_CONV

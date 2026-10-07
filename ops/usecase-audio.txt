@@ -1,0 +1,32 @@
+# use case audio: tflite ops = union over 2 model(s), tools/uc_oplists.py
+# audio/kws_cnn: 11 ops
+# audio/yamnet: 25 ops
+ADD
+CAST
+CEIL
+CONCATENATION
+CONV_2D
+DEPTHWISE_CONV_2D
+DIV
+FLOOR_DIV
+FULLY_CONNECTED
+GATHER
+LOG
+LOGISTIC
+MAXIMUM
+MAX_POOL_2D
+MEAN
+MUL
+PACK
+PAD
+RANGE
+RESHAPE
+SHAPE
+SLICE
+SPLIT_V
+SQRT
+STRIDED_SLICE
+SUB
+SUM
+TRANSPOSE
+ZEROS_LIKE

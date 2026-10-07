@@ -10,6 +10,8 @@ set(TFLITE_SERVER_OPS "" CACHE FILEPATH
   "Register only the TFLite builtin ops listed in this file (one per line; tools/tflite_ops.py writes one from models). Empty: all builtin ops")
 option(TFLITE_SERVER_GC_SECTIONS
   "Compile with -ffunction-sections -fdata-sections and link with --gc-sections" OFF)
+option(TFLITE_SERVER_BUILD_TFLITE_RUN
+  "Also build tools/tflite-run (runs one signature on raw inputs, same LiteRT path and op registration)" OFF)
 
 include(FetchContent)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
@@ -123,3 +125,22 @@ target_link_libraries(tflite-server PRIVATE
   -Wl,--start-group ${_litert_archives} -Wl,--end-group
   "${TOKENIZERS_C_LIB}"
   ${CMAKE_DL_LIBS} Threads::Threads m)
+
+if(TFLITE_SERVER_BUILD_TFLITE_RUN)
+  add_executable(tflite-run tools/tflite-run/tflite_run.cpp src/litert_engine.cpp)
+  if(TFLITE_SERVER_OPS)
+    target_sources(tflite-run PRIVATE ${_selected_ops_srcs})
+  endif()
+  if(TFLITE_SERVER_GC_SECTIONS)
+    target_compile_options(tflite-run PRIVATE -ffunction-sections -fdata-sections)
+    target_link_options(tflite-run PRIVATE -Wl,--gc-sections)
+  endif()
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(tflite-run PRIVATE -fpermissive)
+  endif()
+  get_target_property(_incs tflite-server INCLUDE_DIRECTORIES)
+  target_include_directories(tflite-run PRIVATE src ${_incs})
+  target_link_libraries(tflite-run PRIVATE
+    -Wl,--start-group ${_litert_archives} -Wl,--end-group
+    ${CMAKE_DL_LIBS} Threads::Threads m)
+endif()

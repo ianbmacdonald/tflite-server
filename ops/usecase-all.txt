@@ -1,0 +1,66 @@
+# use case all: tflite ops = union over 17 model(s), tools/uc_oplists.py
+# text/bert_sst2: 18 ops
+# text/minilm_ce: 18 ops
+# text/phish: 18 ops
+# embed/bge_small: 22 ops
+# embed/minilm_l6: 21 ops
+# image/effnet_lite0: 8 ops
+# image/mnv3_large: 10 ops
+# image/mnv3_small: 10 ops
+# image/mobilenetv2: 6 ops
+# detect/ssd_mnv1_q: 6 ops
+# detect/ssdlite_mnv3: 11 ops
+# detect/yolov8n: 13 ops
+# detect/yolox_nano: 16 ops
+# audio/kws_cnn: 11 ops
+# audio/yamnet: 25 ops
+# ts/conv_ae: 9 ops
+# ts/lstm: 8 ops
+ABS
+ADD
+AVERAGE_POOL_2D
+BATCH_MATMUL
+BROADCAST_TO
+CAST
+CEIL
+CONCATENATION
+CONV_2D
+CUSTOM:TFLite_Detection_PostProcess
+DEPTHWISE_CONV_2D
+DIV
+EMBEDDING_LOOKUP
+EXP
+FLOOR_DIV
+FULLY_CONNECTED
+GATHER
+GATHER_ND
+GELU
+HARD_SWISH
+LOG
+LOGICAL_AND
+LOGISTIC
+MAXIMUM
+MAX_POOL_2D
+MEAN
+MUL
+PACK
+PAD
+RANGE
+RELU
+RESHAPE
+RESIZE_NEAREST_NEIGHBOR
+RSQRT
+SELECT_V2
+SHAPE
+SLICE
+SOFTMAX
+SPLIT_V
+SQRT
+SQUARED_DIFFERENCE
+STRIDED_SLICE
+SUB
+SUM
+TANH
+TRANSPOSE
+TRANSPOSE_CONV
+ZEROS_LIKE

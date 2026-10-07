@@ -1,0 +1,24 @@
+# use case text: tflite ops = union over 3 model(s), tools/uc_oplists.py
+# text/bert_sst2: 18 ops
+# text/minilm_ce: 18 ops
+# text/phish: 18 ops
+ADD
+BATCH_MATMUL
+BROADCAST_TO
+CAST
+EMBEDDING_LOOKUP
+FULLY_CONNECTED
+GATHER_ND
+GELU
+LOGICAL_AND
+MEAN
+MUL
+RESHAPE
+RSQRT
+SELECT_V2
+SLICE
+SOFTMAX
+SQUARED_DIFFERENCE
+SUB
+TANH
+TRANSPOSE

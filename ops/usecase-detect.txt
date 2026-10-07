@@ -1,0 +1,27 @@
+# use case detect: tflite ops = union over 4 model(s), tools/uc_oplists.py
+# detect/ssd_mnv1_q: 6 ops
+# detect/ssdlite_mnv3: 11 ops
+# detect/yolov8n: 13 ops
+# detect/yolox_nano: 16 ops
+ADD
+BROADCAST_TO
+CAST
+CONCATENATION
+CONV_2D
+CUSTOM:TFLite_Detection_PostProcess
+DEPTHWISE_CONV_2D
+EXP
+GATHER_ND
+HARD_SWISH
+LOGISTIC
+MAX_POOL_2D
+MUL
+PAD
+RESHAPE
+RESIZE_NEAREST_NEIGHBOR
+SLICE
+SOFTMAX
+STRIDED_SLICE
+SUB
+SUM
+TRANSPOSE
