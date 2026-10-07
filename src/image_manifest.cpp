@@ -89,7 +89,9 @@ ImageManifest parse_image_manifest(const json& j) {
         reject_unknown_keys(p, {"resize", "mean", "std", "channel_order", "layout"}, "preprocess.");
         if (p.contains("resize")) choice(p, "resize", "preprocess.", {"stretch"}, {"center_crop", "resize_shorter"});
         if (p.contains("channel_order")) choice(p, "channel_order", "preprocess.", {"RGB"}, {"BGR"});
-        if (p.contains("layout")) choice(p, "layout", "preprocess.", {"auto", "NHWC"}, {"NCHW"});
+        if (p.contains("layout") && choice(p, "layout", "preprocess.", {"auto", "NHWC", "NCHW"}, {}) == "NCHW") {
+            m.layout = TensorLayout::NCHW;
+        }
         if (p.contains("mean")) m.mean = triple(p, "mean", false);
         if (p.contains("std")) m.std = triple(p, "std", true);
     }

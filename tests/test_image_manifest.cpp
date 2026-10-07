@@ -48,8 +48,11 @@ void test_accepts() {
                        "channel_order": "RGB", "layout": "auto"},
         "top_k_default": 5})"));
     check(m.labels_file == "labels.txt" && m.top_k_default == 5 && m.mean[1] == 127.5f &&
-              m.std[2] == 127.5f,
+              m.std[2] == 127.5f && m.layout == TensorLayout::NHWC,
           "full MobileNet manifest");
+    auto c = parse_image_manifest(json::parse(
+        R"({"task": "image-classification", "preprocess": {"layout": "NCHW"}})"));
+    check(c.layout == TensorLayout::NCHW, "layout NCHW");
     auto s = parse_image_manifest(json::parse(
         R"({"task": "image-classification", "preprocess": {"mean": 0, "std": 255, "layout": "NHWC"}})"));
     check(s.mean[0] == 0.0f && s.std[2] == 255.0f && s.labels_file == "labels.txt" && s.top_k_default == 5,
@@ -64,8 +67,8 @@ void test_rejects() {
                  "manifest.preprocess.resize 'center_crop' not supported in this build");
     expect_error(R"({"task": "image-classification", "preprocess": {"resize": "resize_shorter"}})",
                  "manifest.preprocess.resize 'resize_shorter' not supported in this build");
-    expect_error(R"({"task": "image-classification", "preprocess": {"layout": "NCHW"}})",
-                 "manifest.preprocess.layout 'NCHW' not supported in this build");
+    expect_error(R"({"task": "image-classification", "preprocess": {"layout": "NHCW"}})",
+                 "manifest.preprocess.layout 'NHCW' is not a known value");
     expect_error(R"({"task": "image-classification", "preprocess": {"channel_order": "BGR"}})",
                  "manifest.preprocess.channel_order 'BGR' not supported in this build");
     expect_error(R"({"task": "image-classification", "score_normalization": "softmax"})",

@@ -16,8 +16,9 @@ struct ImageServeOptions {
     int max_concurrent_decodes = 1;
 };
 
-// Image classification: model.tflite (float32 [1,H,W,3] in, float32 [1,N]
-// probabilities out), labels.txt and manifest.json (see image_manifest.h).
+// Image classification: model.tflite (float32 [1,H,W,3], or [1,3,H,W] with
+// preprocess.layout "NCHW", in; float32 [1,N] probabilities out), labels.txt and
+// manifest.json (see image_manifest.h).
 class ImageModel {
 public:
     ImageModel(const std::filesystem::path& dir, int threads, const std::string& weight_cache,

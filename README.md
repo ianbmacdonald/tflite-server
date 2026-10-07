@@ -67,10 +67,12 @@ weights, 8-bit rounding between passes), then each channel becomes `(x - mean) /
 `x` on the 0..255 scale. `mean` and `std` are a number or a 3-vector.
 
 This build accepts only the values shown for `resize`, `score_normalization`,
-`channel_order` and `layout` (`layout` may also be `NHWC`). Reserved values are refused
+`channel_order` and `layout`. `layout` may also be `NHWC` (the same as `auto`) or `NCHW`, for
+a model whose input is `[1, 3, H, W]` (an export from PyTorch): the normalized image is then
+transposed to planar order before inference. A model input that does not match the declared
+layout is refused at load and the error names the input shape. Reserved values are refused
 at load time by name, for example `manifest.preprocess.resize 'center_crop' not supported
-in this build`: `center_crop` and `resize_shorter`, `NCHW`, `BGR`, and `softmax` /
-`sigmoid`. Unknown keys are refused too. With `"score_normalization": "none"` the model
+in this build`: `center_crop` and `resize_shorter`, `BGR`, and `softmax` / `sigmoid`. Unknown keys are refused too. With `"score_normalization": "none"` the model
 must already output probabilities; a score outside [0, 1] is a 500. Quantized-input
 models are refused at load.
 

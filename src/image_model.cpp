@@ -16,6 +16,7 @@
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -27,6 +28,21 @@ constexpr auto kSlotWait = std::chrono::seconds(30);
 
 double ms_since(std::chrono::steady_clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+std::string shape_string(const std::vector<int64_t>& dims) {
+    std::string s = "[";
+    for (size_t i = 0; i < dims.size(); ++i) s += (i ? ", " : "") + std::to_string(dims[i]);
+    return s + "]";
+}
+
+std::vector<float> hwc_to_chw(const std::vector<float>& hwc, int h, int w) {
+    const size_t plane = static_cast<size_t>(h) * static_cast<size_t>(w);
+    std::vector<float> chw(hwc.size());
+    for (size_t p = 0; p < plane; ++p) {
+        for (size_t c = 0; c < 3; ++c) chw[c * plane + p] = hwc[p * 3 + c];
+    }
+    return chw;
 }
 
 }  // namespace
@@ -77,15 +93,26 @@ struct ImageModel::Impl {
             throw std::runtime_error("quantized-input models not supported yet");
         }
         if (et != litert::ElementType::Float32) throw std::runtime_error("model input must be float32");
-        auto dims = it->Layout().Dimensions();
-        if (dims.size() == 4 && dims[0] == 1 && dims[1] == 3 && dims[3] != 3) {
-            throw std::runtime_error("NCHW input not supported in this build");
+        const auto layout_dims = it->Layout().Dimensions();
+        const std::vector<int64_t> dims(layout_dims.begin(), layout_dims.end());
+        const bool nchw = manifest.layout == TensorLayout::NCHW;
+        const bool rank4 = dims.size() == 4 && dims[0] == 1 &&
+                           std::all_of(dims.begin(), dims.end(), [](int64_t d) { return d >= 1; });
+        if (!nchw && rank4 && dims[1] == 3 && dims[3] != 3) {
+            throw std::runtime_error("model input is " + shape_string(dims) +
+                                     " (NCHW); set preprocess.layout to \"NCHW\" in manifest.json");
         }
-        if (dims.size() != 4 || dims[0] != 1 || dims[1] < 1 || dims[2] < 1 || dims[3] != 3) {
-            throw std::runtime_error("model input must be [1, height, width, 3]");
+        if (nchw && rank4 && dims[3] == 3 && dims[1] != 3) {
+            throw std::runtime_error("model input is " + shape_string(dims) +
+                                     " (NHWC) but manifest.json sets preprocess.layout \"NCHW\"");
         }
-        in_h = static_cast<int>(dims[1]);
-        in_w = static_cast<int>(dims[2]);
+        if (!rank4 || (nchw ? dims[1] : dims[3]) != 3) {
+            throw std::runtime_error(std::string("model input must be ") +
+                                     (nchw ? "[1, 3, height, width]" : "[1, height, width, 3]") + "; it is " +
+                                     shape_string(dims));
+        }
+        in_h = static_cast<int>(nchw ? dims[2] : dims[1]);
+        in_w = static_cast<int>(nchw ? dims[3] : dims[2]);
 
         auto ot = outputs[0].TensorType();
         if (!ot) throw std::runtime_error("cannot read the model's output tensor type");
@@ -101,9 +128,9 @@ struct ImageModel::Impl {
         }
         if (verbose) {
             std::fprintf(stderr,
-                         "tflite-server: image-classification, input %dx%d, %zu labels, %d thread(s), "
+                         "tflite-server: image-classification, input %dx%d %s, %zu labels, %d thread(s), "
                          "%d decode slot(s)\n",
-                         in_w, in_h, labels.size(), threads, opts.max_concurrent_decodes);
+                         in_w, in_h, nchw ? "NCHW" : "NHWC", labels.size(), threads, opts.max_concurrent_decodes);
         }
     }
 
@@ -135,6 +162,7 @@ struct ImageModel::Impl {
             tensor = imgproc::resample_triangle(d.image.pixels.get(), src_w, src_h, 3, in_w, in_h);
             d.image.pixels.reset();
             imgproc::normalize_in_place(tensor, manifest.mean, manifest.std);
+            if (manifest.layout == TensorLayout::NCHW) tensor = hwc_to_chw(tensor, in_h, in_w);
             preprocess_ms = ms_since(t0);
         }
 
