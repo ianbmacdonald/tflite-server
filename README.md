@@ -158,6 +158,12 @@ Endpoints:
 
 It binds 127.0.0.1 only. Lemonade reaches it as a local subprocess.
 
+Socket timeouts: a connection that sends nothing for 5 s while a request is being read, or
+accepts nothing for 5 s while a response is written, is closed (cpp-httplib's read and write
+timeouts, set explicitly). The limit is per read, not a cap on a request's total time: a client
+that trickles bytes keeps its connection, so at most `--http-threads` such connections are held,
+and an image request holds one of the `max-concurrent-decodes + 1` request slots meanwhile.
+
 Memory envelope for image requests, beyond the model: each admitted request holds at most
 its body plus one decoded copy. That is about 2.7 x `--max-image-bytes` for base64 JSON (the
 body, the image string, then the decoded bytes) and 1 x for multipart (the image part is

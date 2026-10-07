@@ -34,6 +34,7 @@ namespace {
 constexpr const char* kVersion = TFLITE_SERVER_VERSION;
 constexpr long long kMaxTopK = 1000000;
 constexpr auto kAdmissionWait = std::chrono::seconds(30);
+constexpr auto kSocketTimeout = std::chrono::seconds(5);
 
 struct Args {
     std::string model_path;
@@ -323,6 +324,9 @@ int main(int argc, char** argv) {
         }
 
         httplib::Server srv;
+        // Per-recv idle limits, not a cap on a request's total time.
+        srv.set_read_timeout(kSocketTimeout);
+        srv.set_write_timeout(kSocketTimeout);
         const size_t http_threads = static_cast<size_t>(args.http_threads);
         srv.new_task_queue = [http_threads] { return new httplib::ThreadPool(http_threads); };
         // Base64 inflates by 4/3; 64 KiB covers multipart headers and the JSON wrapper.
