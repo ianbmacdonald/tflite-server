@@ -10,7 +10,13 @@ LiteRT. tools/export_tflite.py follows the export.py shipped in the lemonade-sdk
 
 It links:
 - LiteRT (https://github.com/google-ai-edge/LiteRT), Apache License 2.0
+  and what its CMake build vendors and compiles in: TensorFlow Lite (Apache 2.0), XNNPACK
+  (BSD 3-Clause), cpuinfo and pthreadpool (BSD 2-Clause), FP16 and FXdiv (MIT), Abseil, ruy,
+  gemmlowp, ml_dtypes and FlatBuffers (Apache 2.0), Eigen (MPL 2.0), farmhash (MIT), fft2d
+  (Ooura's licence), NEON_2_SSE on x86_64 (BSD 2-Clause) and KleidiAI on aarch64 (Apache 2.0)
 - HuggingFace tokenizers via mlc-ai/tokenizers-cpp, Apache License 2.0
+- the Rust crates of the tokenizers C shim (incl. onig and Oniguruma) and the Rust standard
+  library; the release archives list them in licenses/rust-crates.txt with their licence texts
 - cpp-httplib, MIT License
 - nlohmann/json, MIT License
 - stb_image v2.30 (https://github.com/nothings/stb, commit 013ac3b), public domain or MIT
