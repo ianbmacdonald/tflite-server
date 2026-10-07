@@ -235,6 +235,23 @@ Against a running server: `tests/e2e_image_server.py`, `tests/load_image_server.
 is under the derived body limit (about 22.4 MB) and gets the image-size 413 on a connection
 that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length.
 
+## Selective op registration
+
+By default every TFLite builtin op is registered (LiteRT's `BuiltinOpResolver`), so every kernel is
+linked. To link only the ops your models use, list them and configure with:
+
+```bash
+python tools/tflite_ops.py text/model.tflite image/model.tflite > ops.txt
+cmake ... -DTFLITE_SERVER_OPS=ops.txt -DTFLITE_SERVER_GC_SECTIONS=ON
+```
+
+`cmake/SelectedOps.cmake` copies LiteRT's `register.cc` and `register_ref.cc` with every `AddBuiltin`
+not in the list removed and compiles them into the server, so the linker never pulls the archive
+members that would register (and link) the other kernels. A model with an op outside the list fails
+to load (`Didn't find op for builtin opcode`). `ops/` has the lists for the DistilBERT text model and
+for DistilBERT plus MobileNetV2. `TFLITE_SERVER_GC_SECTIONS` drops unreferenced functions only if
+LiteRT itself was compiled with `-ffunction-sections -fdata-sections`.
+
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE`; the text path is a derivative of ort-server.

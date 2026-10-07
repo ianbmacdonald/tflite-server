@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(TFLITE_SERVER_PREPROCESS_TESTS
   "Build the image preprocessing tests (they need neither LiteRT nor tokenizers-cpp)" OFF)
+set(TFLITE_SERVER_OPS "" CACHE FILEPATH
+  "Register only the TFLite builtin ops listed in this file (one per line; tools/tflite_ops.py writes one from models). Empty: all builtin ops")
+option(TFLITE_SERVER_GC_SECTIONS
+  "Compile with -ffunction-sections -fdata-sections and link with --gc-sections" OFF)
 
 include(FetchContent)
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
@@ -88,6 +92,17 @@ add_executable(tflite-server
   src/litert_engine.cpp
   src/text_model.cpp)
 target_compile_definitions(tflite-server PRIVATE TFLITE_SERVER_VERSION="${PROJECT_VERSION}")
+if(TFLITE_SERVER_OPS)
+  include(cmake/SelectedOps.cmake)
+  tflite_server_selected_ops("${TFLITE_SERVER_OPS}" "${LITERT_SRC}" _selected_ops_srcs)
+  target_sources(tflite-server PRIVATE ${_selected_ops_srcs})
+endif()
+if(TFLITE_SERVER_GC_SECTIONS)
+  # Only drops LiteRT code at section granularity if LiteRT was built with the same flags.
+  target_compile_options(tflite-server PRIVATE -ffunction-sections -fdata-sections)
+  target_compile_options(tflite_image PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(tflite-server PRIVATE -Wl,--gc-sections)
+endif()
 # LiteRT's C++ headers reuse type names as member names (Span, ElementType), which
 # GCC rejects by default; LiteRT's own CMake build compiles with -fpermissive too.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

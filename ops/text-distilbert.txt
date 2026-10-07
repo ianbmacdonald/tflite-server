@@ -1,0 +1,20 @@
+# TFLite builtin ops of the DistilBERT phishing classifier (cybersectony/phishing-email-detection-distilbert_v2.4.1,
+# tools/export_tflite.py, seq_64..seq_512 signatures), from tools/tflite_ops.py. 18 ops.
+ADD
+BATCH_MATMUL
+CAST
+EMBEDDING_LOOKUP
+FULLY_CONNECTED
+GATHER_ND
+GELU
+LOGICAL_AND
+MEAN
+MUL
+RESHAPE
+RSQRT
+SELECT_V2
+SLICE
+SOFTMAX
+SQUARED_DIFFERENCE
+SUB
+TRANSPOSE
