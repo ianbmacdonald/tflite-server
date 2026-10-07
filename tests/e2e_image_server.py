@@ -6,7 +6,9 @@ Usage:
   e2e_image_server.py <port> <grace_hopper.jpg> --pixel-cap-only  # server started with --max-image-pixels 1000
 
 Standard library only. Expects the TF MobileNetV2 1.0 224 model directory made
-by tools/make_image_model_dir.py and the default limits (16 MiB images).
+by tools/make_image_model_dir.py and the default limits (16 MiB images, one decode slot,
+at least 3 HTTP threads). The busy check holds both request slots with slow uploads and
+takes about 32 s.
 """
 
 import base64
@@ -104,6 +106,60 @@ def oversize_raw(port, total):
         line = "reset"
     s.close()
     return line
+
+
+def chunked_raw(port, total, chunk_size=1 << 20):
+    """Send a chunked (no Content-Length) JSON body of `total` bytes; return the HTTP status line."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=300)
+    s.sendall(b"POST /classify/image HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Transfer-Encoding: chunked\r\n\r\n")
+    try:
+        sent = 0
+        while sent < total:
+            n = min(chunk_size, total - sent)
+            s.sendall(f"{n:x}\r\n".encode() + b"a" * n + b"\r\n")
+            sent += n
+        s.sendall(b"0\r\n\r\n")
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    try:
+        line = s.recv(4096).split(b"\r\n", 1)[0].decode()
+    except ConnectionResetError:
+        line = "reset"
+    s.close()
+    return line
+
+
+def trickle(port, stop):
+    """Hold a request slot: send headers, then one body byte every 2 s (under the 5 s read timeout)."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=300)
+    s.sendall(b"POST /classify/image HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+              b"Content-Length: 1000\r\n\r\n")
+    sent = 0
+    while not stop.is_set() and sent < 999:
+        s.sendall(b" ")
+        sent += 1
+        stop.wait(2)
+    s.close()
+
+
+def busy_503(port, gh, holders=2):
+    """With the default --max-concurrent-decodes 1 there are 2 request slots; hold both, then a
+    third request waits 30 s for one and gets 503."""
+    import threading
+    import time
+    stop = threading.Event()
+    threads = [threading.Thread(target=trickle, args=(port, stop)) for _ in range(holders)]
+    for t in threads:
+        t.start()
+    time.sleep(2)
+    t0 = time.monotonic()
+    status, body = post_image(port, gh)
+    waited = time.monotonic() - t0
+    stop.set()
+    for t in threads:
+        t.join()
+    return status, body, waited
 
 
 def main():
@@ -209,6 +265,13 @@ def main():
     c.close()
     line = oversize_raw(port, 30 * 1000 * 1000)
     check(" 413 " in line, "30 MB body over the payload limit -> 413 before the body is read", line)
+
+    line = chunked_raw(port, 30 * 1000 * 1000)
+    check(" 413 " in line, "30 MB chunked body (no Content-Length) -> 413", line)
+
+    status, body, waited = busy_503(port, gh)
+    check(status == 503 and "busy" in body.get("error", "") and 29 < waited < 60,
+          f"both request slots held by slow uploads -> 503 after {waited:.1f} s", f"{status} {body}")
 
     status, health = request(port, "GET", "/health")
     status2, body = post_image(port, gh)
