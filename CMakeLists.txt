@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
-project(tflite-server VERSION 0.2.0 LANGUAGES CXX)
+project(tflite-server VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(TFLITE_SERVER_PREPROCESS_TESTS
   "Build the image preprocessing tests (they need neither LiteRT nor tokenizers-cpp)" OFF)
-set(TFLITE_SERVER_OPS "" CACHE FILEPATH
-  "Register only the TFLite builtin ops listed in this file (one per line; tools/tflite_ops.py writes one from models). Empty: all builtin ops")
+set(TFLITE_SERVER_OPS "${CMAKE_CURRENT_SOURCE_DIR}/ops/usecase-all.txt" CACHE STRING
+  "Register only the TFLite builtin ops listed in this file (one per line; tools/tflite_ops.py writes one from models). Default: the curated set, ops/usecase-all.txt. 'all': every builtin op (the general build)")
 option(TFLITE_SERVER_GC_SECTIONS
-  "Compile with -ffunction-sections -fdata-sections and link with --gc-sections" OFF)
+  "Compile with -ffunction-sections -fdata-sections and link with --gc-sections" ON)
 option(TFLITE_SERVER_BUILD_TFLITE_RUN
   "Also build tools/tflite-run (runs one signature on raw inputs, same LiteRT path and op registration)" OFF)
 
@@ -94,6 +94,9 @@ add_executable(tflite-server
   src/litert_engine.cpp
   src/text_model.cpp)
 target_compile_definitions(tflite-server PRIVATE TFLITE_SERVER_VERSION="${PROJECT_VERSION}")
+if(TFLITE_SERVER_OPS STREQUAL "all")
+  set(TFLITE_SERVER_OPS "")
+endif()
 if(TFLITE_SERVER_OPS)
   include(cmake/SelectedOps.cmake)
   tflite_server_selected_ops("${TFLITE_SERVER_OPS}" "${LITERT_SRC}" _selected_ops_srcs)

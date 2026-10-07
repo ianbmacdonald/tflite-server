@@ -119,7 +119,7 @@ Recommended on a small gateway: `--max-image-pixels 4000000 --max-concurrent-dec
 
 Endpoints:
 
-- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.2.0"}`, where
+- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.3.0"}`, where
   `task` is `image-classification`, `text-classification` or `token-classification`.
 - `POST /classify {"input": "...", "top_k": 2}` returns `{"labels": {"LABEL_1": 0.98, ...}}`.
   On an image model it is a 400.
@@ -235,22 +235,31 @@ Against a running server: `tests/e2e_image_server.py`, `tests/load_image_server.
 is under the derived body limit (about 22.4 MB) and gets the image-size 413 on a connection
 that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length.
 
-## Selective op registration
+## Build: curated (default) or general
 
-By default every TFLite builtin op is registered (LiteRT's `BuiltinOpResolver`), so every kernel is
-linked. To link only the ops your models use, list them and configure with:
+The default build registers only the curated op set, `ops/usecase-all.txt`: the 48 TFLite builtin
+ops of every model of the six use cases Lemonade's gateway study covers (text classification, sentence
+embeddings, image classification, object detection, audio, time series; 17 models, among them the
+DistilBERT text export and MobileNetV2). It is the release build. A model with an op outside the list
+fails to load with `Didn't find op for builtin opcode`. The general build registers every TFLite
+builtin op, for development hosts and models outside the curated set:
 
 ```bash
-python tools/tflite_ops.py text/model.tflite image/model.tflite > ops.txt
-cmake ... -DTFLITE_SERVER_OPS=ops.txt -DTFLITE_SERVER_GC_SECTIONS=ON
+cmake ... -DTFLITE_SERVER_OPS=all                    # general build
+cmake ... -DTFLITE_SERVER_OPS=my-ops.txt             # your own list
+python tools/tflite_ops.py text/model.tflite image/model.tflite > my-ops.txt
 ```
 
 `cmake/SelectedOps.cmake` copies LiteRT's `register.cc` and `register_ref.cc` with every `AddBuiltin`
 not in the list removed and compiles them into the server, so the linker never pulls the archive
-members that would register (and link) the other kernels. A model with an op outside the list fails
-to load (`Didn't find op for builtin opcode`). `ops/` has the lists for the DistilBERT text model and
-for DistilBERT plus MobileNetV2. `TFLITE_SERVER_GC_SECTIONS` drops unreferenced functions only if
-LiteRT itself was compiled with `-ffunction-sections -fdata-sections`.
+members that would register (and link) the other kernels. `ops/usecase-<case>.txt` lists each use
+case on its own; `ops/text-distilbert.txt` and `ops/text-image-distilbert-mobilenetv2.txt` the two
+models of v0.2.0.
+
+`TFLITE_SERVER_GC_SECTIONS` (default ON) compiles with `-ffunction-sections -fdata-sections` and
+links with `--gc-sections`. It drops the unused parts of the Rust tokenizer library in any case, and
+the unused LiteRT code only if LiteRT itself was compiled with the same two flags, as the release
+LiteRT tree is (`LITERT_BUILD=<that tree> ./build-prplos-x86_64.sh`).
 
 ## License
 
