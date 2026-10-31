@@ -251,6 +251,9 @@ is under the derived body limit (about 22.4 MB) and gets the image-size 413 on a
 that stays usable, and a 30 MB body is over it and gets 413 from its Content-Length. A 30 MB
 chunked body (no Content-Length) also gets 413, and with both request slots held by two slow
 uploads a third request gets 503 after the 30 s admission wait (the check takes about 32 s).
+`tests/sigterm_pid1.sh` runs the server as PID 1 of a PID namespace and times its exit after one
+SIGTERM: 12 to 54 ms on the musl build, while a build without the signal handler ignores the
+signal and is killed after 5 s.
 
 ## Build: curated (default) or general
 
