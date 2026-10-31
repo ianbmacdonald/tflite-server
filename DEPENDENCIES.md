@@ -25,33 +25,38 @@ tokenizers-cpp's git submodules (msgpack, sentencepiece) are not needed: the bui
 
 ## Fetched by the LiteRT v2.3.2 CMake configure
 
-`B` is the LiteRT build directory. "Offline" is the variable that points the build at a local copy
-instead of fetching (all on the LiteRT configure command line, plus `-DFETCHCONTENT_FULLY_DISCONNECTED=ON`).
+`B` is the LiteRT build directory. "Offline" is where the unpacked source goes for a build with no
+network: LiteRT's CMake declares each FetchContent source at a fixed `SOURCE_DIR` under `B` and also
+hard-codes several of those paths as include directories (`opencl_headers`, `xnnpack/include`,
+`safeint`, `flatbuffers`, `FP16-source`), so `FETCHCONTENT_SOURCE_DIR_<NAME>` pointing elsewhere
+configures but does not compile (measured). Unpack each source there (no `.git` needed) and
+configure with `-DFETCHCONTENT_FULLY_DISCONNECTED=ON` plus the `-D` variables named in the column,
+which XNNPACK and pthreadpool read instead of downloading.
 
 | Name | URL | Commit / hash as resolved | Licence | Offline |
 |---|---|---|---|---|
-| abseil-cpp | https://github.com/abseil/abseil-cpp | `5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a` (tag 20260526.0) | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP` |
-| TensorFlow (TFLite sources, `B/tflite_build/tensorflow-src`) | https://github.com/tensorflow/tensorflow | `a344c313f75bbe28d00abe63f5d49cd6f233b6d0` (tag v2.21.0-rc0) | Apache-2.0 | `TENSORFLOW_SOURCE_DIR` |
-| XNNPACK | https://github.com/google/XNNPACK | `d89ef6669a14db203b3b7935b1b3862cb63fb6df` | BSD-3-Clause | `FETCHCONTENT_SOURCE_DIR_XNNPACK` |
-| pthreadpool (XNNPACK) | https://github.com/google/pthreadpool/archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.zip | sha256 `9b9fb1179b71021c0c048504eab636424c58e9c8374404754ece6d7cd90f26d4` | BSD-2-Clause | `PTHREADPOOL_SOURCE_DIR` |
-| FXdiv (pthreadpool) | https://github.com/Maratyszcza/FXdiv | `63058eff77e11aa15bf531df5dd34395ec3017c8` (**unpinned upstream: `GIT_TAG master`**) | MIT | `FXDIV_SOURCE_DIR` |
-| FP16 | https://github.com/Maratyszcza/FP16/archive/0a92994d729ff76a58f692d3028ca1b64b145d91.zip | sha256 `e66e65515fa09927b348d3d584c68be4215cfe664100d01c9dbc7655a5716d70` | MIT | `FP16_SOURCE_DIR` |
-| cpuinfo | https://github.com/pytorch/cpuinfo | `8ce83db858065145192c97af90cb668ad72a12e9` | BSD-2-Clause | `FETCHCONTENT_SOURCE_DIR_CPUINFO` |
-| eigen | https://gitlab.com/libeigen/eigen | `ea13a98decd497a8c5588fb5de71b57bcf10d864` | MPL-2.0 (built with `EIGEN_MPL2_ONLY`) | `FETCHCONTENT_SOURCE_DIR_EIGEN` |
-| farmhash | https://github.com/google/farmhash | `0d859a811870d10f53a594927d0d0b97573ad06d` | MIT | `FETCHCONTENT_SOURCE_DIR_FARMHASH` |
-| fft2d (Ooura FFT) | https://storage.googleapis.com/mirror.tensorflow.org/github.com/petewarden/OouraFFT/archive/v1.0.tar.gz | sha256 `5f4dabc2ae21e1f537425d58a49cdca1c49ea11db0d6271e2a4b27e9697548eb` | permissive (Ooura's notice, `readme2d.txt`) | `FETCHCONTENT_SOURCE_DIR_FFT2D` |
-| flatbuffers (library) | https://github.com/google/flatbuffers | `187240970746d00bbd26b0f5873ed54d2477f9f3` (v25.9.23) | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_FLATBUFFERS` |
-| gemmlowp | https://github.com/google/gemmlowp | `16e8662c34917be0065110bfcd9cc27d30f52fdf` | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_GEMMLOWP` |
-| ruy | https://github.com/google/ruy | `3286a34cc8de6149ac6844107dfdffac91531e72` | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_RUY` |
-| ml_dtypes | https://github.com/jax-ml/ml_dtypes | `00d98cd92ade342fef589c0470379abb27baebe9` | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_ML_DTYPES` |
-| protobuf | https://github.com/protocolbuffers/protobuf | `90b73ac3f0b10320315c2ca0d03a5a9b095d2f66` | BSD-3-Clause | `FETCHCONTENT_SOURCE_DIR_PROTOBUF` |
-| SafeInt | https://github.com/dcleblanc/SafeInt | `72f0745e26091af6d1186fd91426377f16688ba7` | MIT | `FETCHCONTENT_SOURCE_DIR_SAFEINT` |
-| NEON_2_SSE (x86_64 only) | https://storage.googleapis.com/mirror.tensorflow.org/github.com/intel/ARM_NEON_2_x86_SSE/archive/a15b489e1222b2087007546b4912e21293ea86ff.tar.gz | sha256 `019fbc7ec25860070a1d90e12686fc160cfb33e22aa063c80f52b363f1361e9d` | BSD-2-Clause | `FETCHCONTENT_SOURCE_DIR_NEON2SSE` |
-| EGL-Registry (headers) | https://github.com/KhronosGroup/EGL-Registry | `649981109e263b737e7735933c90626c29a306f2` | Apache-2.0 / MIT | `FETCHCONTENT_SOURCE_DIR_EGL_HEADERS` |
-| OpenCL-Headers | https://github.com/KhronosGroup/OpenCL-Headers | `dcd5bede6859d26833cd85f0d6bbcee7382dc9b3` | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_OPENCL_HEADERS` |
-| OpenGL-Registry (headers) | https://github.com/KhronosGroup/OpenGL-Registry | `0cb0880d91581d34f96899c86fc1bf35627b4b81` | Apache-2.0 / MIT | `FETCHCONTENT_SOURCE_DIR_OPENGL_HEADERS` |
-| Vulkan-Headers | https://github.com/KhronosGroup/Vulkan-Headers | `32c07c0c5334aea069e518206d75e002ccd85389` | Apache-2.0 | `FETCHCONTENT_SOURCE_DIR_VULKAN_HEADERS` |
-| KleidiAI (XNNPACK, aarch64 only) | https://gitlab.arm.com/kleidi/kleidiai/-/archive/4bc7bd457930de119f8b826ecfdebfbd9c08cf8c/kleidiai-4bc7bd457930de119f8b826ecfdebfbd9c08cf8c.zip | sha256 `652ee046ebf99bee5ed78aaf8961ea1df6ac09b6ebbd3a33106d9ce255efba69` | Apache-2.0 and BSD-3-Clause | `KLEIDIAI_SOURCE_DIR` |
+| abseil-cpp | https://github.com/abseil/abseil-cpp | `5650e9cf76d3be4318d5fa3af38ee483ddfd5e4a` (tag 20260526.0) | Apache-2.0 | `B/abseil-cpp` |
+| TensorFlow (TFLite sources, `B/tflite_build/tensorflow-src`) | https://github.com/tensorflow/tensorflow | `a344c313f75bbe28d00abe63f5d49cd6f233b6d0` (tag v2.21.0-rc0) | Apache-2.0 | `B/tflite_build/tensorflow-src` |
+| XNNPACK | https://github.com/google/XNNPACK | `d89ef6669a14db203b3b7935b1b3862cb63fb6df` | BSD-3-Clause | `B/xnnpack` |
+| pthreadpool (XNNPACK) | https://github.com/google/pthreadpool/archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.zip | sha256 `9b9fb1179b71021c0c048504eab636424c58e9c8374404754ece6d7cd90f26d4` | BSD-2-Clause | `B/pthreadpool-source` + `-DPTHREADPOOL_SOURCE_DIR` |
+| FXdiv (pthreadpool) | https://github.com/Maratyszcza/FXdiv | `63058eff77e11aa15bf531df5dd34395ec3017c8` (**unpinned upstream: `GIT_TAG master`**) | MIT | `B/FXdiv-source` + `-DFXDIV_SOURCE_DIR` |
+| FP16 | https://github.com/Maratyszcza/FP16/archive/0a92994d729ff76a58f692d3028ca1b64b145d91.zip | sha256 `e66e65515fa09927b348d3d584c68be4215cfe664100d01c9dbc7655a5716d70` | MIT | `B/FP16-source` + `-DFP16_SOURCE_DIR` |
+| cpuinfo | https://github.com/pytorch/cpuinfo | `8ce83db858065145192c97af90cb668ad72a12e9` | BSD-2-Clause | `B/cpuinfo` |
+| eigen | https://gitlab.com/libeigen/eigen | `ea13a98decd497a8c5588fb5de71b57bcf10d864` | MPL-2.0 (built with `EIGEN_MPL2_ONLY`) | `B/eigen` |
+| farmhash | https://github.com/google/farmhash | `0d859a811870d10f53a594927d0d0b97573ad06d` | MIT | `B/farmhash` |
+| fft2d (Ooura FFT) | https://storage.googleapis.com/mirror.tensorflow.org/github.com/petewarden/OouraFFT/archive/v1.0.tar.gz | sha256 `5f4dabc2ae21e1f537425d58a49cdca1c49ea11db0d6271e2a4b27e9697548eb` | permissive (Ooura's notice, `readme2d.txt`) | `B/fft2d` |
+| flatbuffers (library) | https://github.com/google/flatbuffers | `187240970746d00bbd26b0f5873ed54d2477f9f3` (v25.9.23) | Apache-2.0 | `B/flatbuffers` |
+| gemmlowp | https://github.com/google/gemmlowp | `16e8662c34917be0065110bfcd9cc27d30f52fdf` | Apache-2.0 | `B/gemmlowp` |
+| ruy | https://github.com/google/ruy | `3286a34cc8de6149ac6844107dfdffac91531e72` | Apache-2.0 | `B/ruy` |
+| ml_dtypes | https://github.com/jax-ml/ml_dtypes | `00d98cd92ade342fef589c0470379abb27baebe9` | Apache-2.0 | `B/ml_dtypes` |
+| protobuf | https://github.com/protocolbuffers/protobuf | `90b73ac3f0b10320315c2ca0d03a5a9b095d2f66` | BSD-3-Clause | `B/protobuf` |
+| SafeInt | https://github.com/dcleblanc/SafeInt | `72f0745e26091af6d1186fd91426377f16688ba7` | MIT | `B/safeint` |
+| NEON_2_SSE (x86_64 only) | https://storage.googleapis.com/mirror.tensorflow.org/github.com/intel/ARM_NEON_2_x86_SSE/archive/a15b489e1222b2087007546b4912e21293ea86ff.tar.gz | sha256 `019fbc7ec25860070a1d90e12686fc160cfb33e22aa063c80f52b363f1361e9d` | BSD-2-Clause | `B/neon2sse` |
+| EGL-Registry (headers) | https://github.com/KhronosGroup/EGL-Registry | `649981109e263b737e7735933c90626c29a306f2` | Apache-2.0 / MIT | `B/egl_headers` |
+| OpenCL-Headers | https://github.com/KhronosGroup/OpenCL-Headers | `dcd5bede6859d26833cd85f0d6bbcee7382dc9b3` | Apache-2.0 | `B/opencl_headers` |
+| OpenGL-Registry (headers) | https://github.com/KhronosGroup/OpenGL-Registry | `0cb0880d91581d34f96899c86fc1bf35627b4b81` | Apache-2.0 / MIT | `B/opengl_headers` |
+| Vulkan-Headers | https://github.com/KhronosGroup/Vulkan-Headers | `32c07c0c5334aea069e518206d75e002ccd85389` | Apache-2.0 | `B/vulkan_headers` |
+| KleidiAI (XNNPACK, aarch64 only) | https://gitlab.arm.com/kleidi/kleidiai/-/archive/4bc7bd457930de119f8b826ecfdebfbd9c08cf8c/kleidiai-4bc7bd457930de119f8b826ecfdebfbd9c08cf8c.zip | sha256 `652ee046ebf99bee5ed78aaf8961ea1df6ac09b6ebbd3a33106d9ce255efba69` | Apache-2.0 and BSD-3-Clause | `B/kleidiai-source` + `-DKLEIDIAI_SOURCE_DIR` |
 
 Both architectures resolve the same commits (checked tree by tree on ai4); NEON_2_SSE is x86_64 only and
 KleidiAI aarch64 only.
@@ -168,11 +173,11 @@ OpenWrt-style: fetch everything in a download step, then build with no network.
    `patch -p1`).
 3. Build a host `flatc` from the flatbuffers v25.9.23 source (host compiler, target `flatc` only)
    and pass its directory as `-DTFLITE_HOST_TOOLS_DIR`.
-4. Configure LiteRT with `-DFETCHCONTENT_FULLY_DISCONNECTED=ON`, one
-   `-DFETCHCONTENT_SOURCE_DIR_<NAME>=<dir>` per FetchContent row, `-DTENSORFLOW_SOURCE_DIR`, and `-DPTHREADPOOL_SOURCE_DIR`,
-   `-DFXDIV_SOURCE_DIR`, `-DFP16_SOURCE_DIR` (and on aarch64 `-DKLEIDIAI_SOURCE_DIR`), which
-   XNNPACK and pthreadpool read instead of downloading. `tools/feed/build-litert.sh` passes
-   anything in `LITERT_CMAKE_EXTRA` through.
+4. Unpack every LiteRT-table source at its `B/...` path and configure LiteRT with
+   `-DFETCHCONTENT_FULLY_DISCONNECTED=ON -DPTHREADPOOL_SOURCE_DIR=B/pthreadpool-source
+   -DFXDIV_SOURCE_DIR=B/FXdiv-source -DFP16_SOURCE_DIR=B/FP16-source` (aarch64 also
+   `-DKLEIDIAI_SOURCE_DIR=B/kleidiai-source`). `tools/feed/build-litert.sh` passes anything in
+   `LITERT_CMAKE_EXTRA` through; its LiteRT build directory is `$B/litert`.
 5. Configure tflite-server with `-DFETCHCONTENT_FULLY_DISCONNECTED=ON
    -DFETCHCONTENT_SOURCE_DIR_HTTPLIB=<dir> -DFETCHCONTENT_SOURCE_DIR_JSON=<dir>`
    (`TFLITE_SERVER_CMAKE_EXTRA` in `tools/feed/build-tflite-server.sh`).
