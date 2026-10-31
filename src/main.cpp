@@ -15,8 +15,12 @@
 #include "image_preprocess.h"
 #include "text_model.h"
 
+#include <pthread.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
@@ -25,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -38,6 +43,7 @@ constexpr auto kSocketTimeout = std::chrono::seconds(5);
 
 struct Args {
     std::string model_path;
+    std::string host = "127.0.0.1";
     int port = 0;
     int threads = 0;  // 0: one per hardware thread
     std::string weight_cache;  // XNNPACK packed-weight cache file; empty = in memory
@@ -52,7 +58,7 @@ struct Args {
 };
 
 const char* kUsage =
-    "usage: tflite-server --model-path <dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]\n"
+    "usage: tflite-server --model-path <dir> --port <n> [--host ADDR] [--threads N] [--weight-cache FILE] [--verbose]\n"
     "  image models: [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]\n"
     "                [--decode-budget-factor N] [--max-decode-bytes N]\n"
     "  all models:   [--http-threads 2..16] [--oom-score-adj 0..1000]";
@@ -76,6 +82,7 @@ Args parse_args(int argc, char** argv) {
         const bool has_value = i + 1 < argc;
         if (f == "--model-path" && has_value) a.model_path = argv[++i];
         else if (f == "--port" && has_value) a.port = static_cast<int>(parse_int(f, argv[++i]));
+        else if (f == "--host" && has_value) a.host = argv[++i];
         else if (f == "--threads" && has_value) a.threads = static_cast<int>(parse_int(f, argv[++i]));
         else if (f == "--weight-cache" && has_value) a.weight_cache = argv[++i];
         else if (f == "--verbose") a.verbose = true;
@@ -91,7 +98,7 @@ Args parse_args(int argc, char** argv) {
             a.oom_score_adj = static_cast<int>(parse_int(f, argv[++i]));
         }
     }
-    if (a.model_path.empty() || a.port == 0) throw std::runtime_error(kUsage);
+    if (a.model_path.empty() || a.port == 0 || a.host.empty()) throw std::runtime_error(kUsage);
     if (a.max_image_bytes < 1024 || a.max_image_bytes > (256ull << 20)) {
         throw std::runtime_error("--max-image-bytes must be from 1024 to 268435456");
     }
@@ -118,6 +125,44 @@ Args parse_args(int argc, char** argv) {
     }
     return a;
 }
+
+// Blocked before any thread starts, so every thread inherits the mask and only
+// SignalStop's waiter receives them.
+sigset_t block_stop_signals() {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGINT);
+    if (pthread_sigmask(SIG_BLOCK, &set, nullptr) != 0) throw std::runtime_error("cannot block SIGTERM");
+    return set;
+}
+
+// In a container the engine is PID 1, where a signal with no handler is
+// ignored, so without this a stop waits out the runtime's SIGKILL timeout.
+class SignalStop {
+public:
+    SignalStop(httplib::Server& srv, const sigset_t& set) : set_(set) {
+        waiter_ = std::thread([this, &srv] {
+            int sig = 0;
+            sigwait(&set_, &sig);
+            // A signal during startup arrives before listen() binds.
+            while (!srv.is_running() && !done_) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            srv.stop();
+        });
+    }
+    ~SignalStop() {
+        done_ = true;
+        pthread_kill(waiter_.native_handle(), SIGTERM);
+        waiter_.join();
+    }
+    SignalStop(const SignalStop&) = delete;
+    SignalStop& operator=(const SignalStop&) = delete;
+
+private:
+    sigset_t set_;
+    std::atomic<bool> done_{false};
+    std::thread waiter_;
+};
 
 // Raising the score needs no privilege. It makes this process the OOM killer's
 // first choice over lemond or an LLM backend sharing the host.
@@ -301,6 +346,7 @@ void read_image_request(const httplib::Request& req, const httplib::Response& re
 
 int main(int argc, char** argv) {
     try {
+        const sigset_t stop_signals = block_stop_signals();
         Args args = parse_args(argc, argv);
         apply_oom_score_adj(args.oom_score_adj);
 
@@ -418,8 +464,9 @@ int main(int argc, char** argv) {
             }
         });
 
-        if (!srv.listen("127.0.0.1", args.port)) {
-            std::fprintf(stderr, "tflite-server: failed to bind 127.0.0.1:%d\n", args.port);
+        SignalStop signal_stop(srv, stop_signals);
+        if (!srv.listen(args.host, args.port)) {
+            std::fprintf(stderr, "tflite-server: failed to bind %s:%d\n", args.host.c_str(), args.port);
             return 1;
         }
         return 0;

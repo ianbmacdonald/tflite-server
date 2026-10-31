@@ -84,12 +84,14 @@ builds the directory for TF MobileNetV2 1.0 224 fp32 (`mobilenet_v2_1.0_224.tfli
 ## Run
 
 ```bash
-tflite-server --model-path <model-dir> --port <n> [--threads N] [--weight-cache FILE] [--verbose]
+tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [--weight-cache FILE] [--verbose]
               [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]
               [--decode-budget-factor N] [--max-decode-bytes N] [--http-threads 2..16]
               [--oom-score-adj 0..1000]
 ```
 
+- `--host ADDR` (default 127.0.0.1): the address to listen on. `0.0.0.0` listens on every
+  interface, e.g. inside a container whose port is published.
 - `--threads N`: number of CPU threads (default: one per hardware thread).
 - `--weight-cache FILE`: XNNPACK packed-weight cache file. **Use it on small hosts.** Without it,
   XNNPACK packs the weights into anonymous memory once per signature. With it, one packed copy is
@@ -156,7 +158,12 @@ Endpoints:
   PNG (all bit depths and color types; alpha is dropped) are supported. EXIF orientation is not
   applied, as in the Pillow reference.
 
-It binds 127.0.0.1 only. Lemonade reaches it as a local subprocess.
+It binds 127.0.0.1 unless `--host` says otherwise. Lemonade reaches it as a local subprocess.
+
+SIGTERM and SIGINT stop it cleanly: the listener closes, in-flight requests finish, and it exits
+0. A signal that arrives while the model is still loading takes effect once loading is done. As
+PID 1 in a container, where a signal without a handler is ignored, this is what makes
+`docker stop` return at once instead of waiting for its SIGKILL timeout.
 
 Socket timeouts: a connection that sends nothing for 5 s while a request is being read, or
 accepts nothing for 5 s while a response is written, is closed (cpp-httplib's read and write
