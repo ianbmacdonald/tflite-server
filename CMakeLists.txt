@@ -85,6 +85,22 @@ file(GLOB_RECURSE _litert_archives "${LITERT_BUILD}/*.a")
 list(FILTER _litert_archives EXCLUDE REGEX "/(tools|gtest|gmock|googletest|benchmark)[^/]*/")
 list(FILTER _litert_archives EXCLUDE REGEX "(gtest|gmock|benchmark)[^/]*\\.a$")
 list(FILTER _litert_archives EXCLUDE REGEX "/testdata/|-src/")
+# Source trees LiteRT compiled against: fetched into the LiteRT build, or the local copies an
+# offline LiteRT build was given (TENSORFLOW_SOURCE_DIR, FETCHCONTENT_SOURCE_DIR_<NAME>).
+load_cache("${LITERT_BUILD}" READ_WITH_PREFIX _litert_
+  TENSORFLOW_SOURCE_DIR FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP FETCHCONTENT_SOURCE_DIR_FLATBUFFERS)
+set(_litert_tf "${LITERT_BUILD}/tflite_build/tensorflow-src")
+set(_litert_absl "${LITERT_BUILD}/abseil-cpp")
+set(_litert_fb "${LITERT_BUILD}/flatbuffers")
+if(_litert_TENSORFLOW_SOURCE_DIR)
+  set(_litert_tf "${_litert_TENSORFLOW_SOURCE_DIR}")
+endif()
+if(_litert_FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP)
+  set(_litert_absl "${_litert_FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP}")
+endif()
+if(_litert_FETCHCONTENT_SOURCE_DIR_FLATBUFFERS)
+  set(_litert_fb "${_litert_FETCHCONTENT_SOURCE_DIR_FLATBUFFERS}")
+endif()
 list(LENGTH _litert_archives _n)
 message(STATUS "tflite-server: linking ${_n} LiteRT archives from ${LITERT_BUILD}")
 
@@ -116,11 +132,11 @@ endif()
 target_include_directories(tflite-server PRIVATE
   "${LITERT_SRC}"
   "${LITERT_SRC}/tflite/.."
-  "${LITERT_BUILD}/abseil-cpp"
-  "${LITERT_BUILD}/flatbuffers/include"
+  "${_litert_absl}"
+  "${_litert_fb}/include"
   "${LITERT_BUILD}/include"
   "${LITERT_BUILD}/tflite_build"
-  "${LITERT_BUILD}/tflite_build/tensorflow-src"
+  "${_litert_tf}"
   "${TOKENIZERS_CPP_SRC}/include")
 target_link_libraries(tflite-server PRIVATE
   tflite_image
