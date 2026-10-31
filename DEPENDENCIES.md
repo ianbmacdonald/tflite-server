@@ -183,6 +183,14 @@ OpenWrt-style: fetch everything in a download step, then build with no network.
    (`TFLITE_SERVER_CMAKE_EXTRA` in `tools/feed/build-tflite-server.sh`).
 6. Build the tokenizer shim with `CARGO_NET_OFFLINE=true` and the vendored sources.
 
+Measured on ai4, 2026-10-31 (x86_64): `tools/feed/offline-check.sh x86_64` ran steps 4-6 inside
+`unshare -rn` (no network: a `curl` to github.com fails inside it), with every source unpacked
+from the online build's trees without `.git`. LiteRT, the shim (from `cargo vendor`) and
+tflite-server built, and the offline binary gives the online binary's `/classify` answer. The
+configure still prints "Downloading TensorFlow repository..." (a status line printed before
+FetchContent runs disconnected); nothing is fetched. The stripped binary is 4 KiB smaller than the
+online one (10,891,128 vs 10,895,224 bytes): embedded source paths differ.
+
 
 ## Licence flags
 
