@@ -102,8 +102,12 @@ OPS=$(grep -E '^TFLITE_SERVER_OPS:' "$BLD/CMakeCache.txt" | cut -d= -f2-)
   if [ -n "$OPS" ] && [ "$OPS" != all ]; then
     echo "Operators: curated, $(basename "$OPS") ($(grep -v '^#' "$OPS" | grep -c .) TFLite builtin ops: the union over the six use cases"
     echo "  of the gateway study - text classification, sentence embeddings, image classification, object detection,"
-    echo "  audio, time series; 17 models incl. DistilBERT and MobileNetV2 - plus the zero-shot and decision models"
-    echo "  GLiClass-Edge v3.0, gliclass-modern-base-v3.0, Julia-1 and Laya):"
+    if [ "$(basename "$OPS")" = usecase-all-zeroshot.txt ]; then
+      echo "  audio, time series; 17 models incl. DistilBERT and MobileNetV2 - plus the opt-in zero-shot and decision"
+      echo "  models GLiClass-Edge v3.0, gliclass-modern-base-v3.0, Julia-1 and Laya):"
+    else
+      echo "  audio, time series; 17 models incl. DistilBERT and MobileNetV2):"
+    fi
     grep -v '^#' "$OPS" | grep . | paste -sd' ' | fold -s -w 100 | sed 's/^/  /'
     echo "  A model with another op fails to load (Didn't find op for builtin opcode). Build with"
     echo "  -DTFLITE_SERVER_OPS=all for every builtin op."
