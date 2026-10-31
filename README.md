@@ -123,7 +123,7 @@ Recommended on a small gateway: `--max-image-pixels 4000000 --max-concurrent-dec
 
 Endpoints:
 
-- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.3.0"}`, where
+- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.4.0"}`, where
   `task` is `image-classification`, `text-classification` or `token-classification`.
 - `POST /classify {"input": "...", "top_k": 2}` returns `{"labels": {"LABEL_1": 0.98, ...}}`.
   On an image model it is a 400.
