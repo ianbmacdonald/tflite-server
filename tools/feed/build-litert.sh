@@ -2,7 +2,8 @@
 # LiteRT (static libraries, CMake) for prplOS 5.1 musl. ARCH=x86_64|aarch64 build-litert.sh
 # LITERT_SRC must be a checkout of LITERT_COMMIT with patches/musl/litert/*.patch applied
 # (prepare-sources.sh does that). Compiled with -ffunction-sections -fdata-sections so the
-# tflite-server link can drop the kernels it does not register. NPU off (no vendor SDK). GPU stays on: litert_runtime
+# tflite-server link can drop the kernels it does not register. NPU off (no vendor SDK), tensor
+# examples off (no prebuilt accelerator download). GPU stays on: litert_runtime
 # does not compile without the OpenCL headers (measured on v2.3.2); inference runs on the CPU.
 set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/env.sh"
@@ -22,7 +23,7 @@ cmake -S "$LITERT_SRC/litert" -B "$L" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DTFLITE_HOST_TOOLS_DIR="$HOST_FLATC_DIR" \
-  -DLITERT_ENABLE_NPU=OFF \
+  -DLITERT_ENABLE_NPU=OFF -DLITERT_TENSOR_BUILD_EXAMPLES=OFF \
   ${LITERT_CMAKE_EXTRA:-} > "$L/cfg.log" 2>&1
 if grep -q -a "fetching FlatBuffers to build flatc" "$L/cfg.log"; then
   echo "ABORT: flatc would be built as a target binary"; exit 1
@@ -33,6 +34,10 @@ for d in qnn_headers neuro_pilot-src litecore_headers; do
 done
 if grep -a -E "QAIRT|qnn_headers|NeuroPilot|LiteCore" "$L/cfg.log"; then
   echo "ABORT: the configure log names a vendor NPU SDK"; exit 1
+fi
+# No prebuilt binary either (patches/musl/litert/0003).
+if grep -a "Downloading LiteRT GPU accelerator" "$L/cfg.log"; then
+  echo "ABORT: a prebuilt accelerator library was downloaded"; exit 1
 fi
 ninja -C "$L" -j"$JOBS" litert_c_api run_model > "$L/build.log" 2>&1
 find "$L" \( -name liblitert_c_api.a -o -name run_model \) -type f -exec ls -la {} \;

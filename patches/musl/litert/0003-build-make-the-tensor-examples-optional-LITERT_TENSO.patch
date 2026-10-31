@@ -1,0 +1,44 @@
+From 56b50593af9df1efc29f8cc3b057741aee823cb2 Mon Sep 17 00:00:00 2001
+From: Ian MacDonald <ian@netstatz.com>
+Date: Sat, 31 Oct 2026 02:26:23 -0400
+Subject: [PATCH 3/3] build: make the tensor examples optional
+ (LITERT_TENSOR_BUILD_EXAMPLES)
+
+tensor/examples/segmentation and tensor/examples/gemma3 are configured
+whenever litert/ is, and at configure time they download a prebuilt
+libLiteRtWebGpuAccelerator.so from
+https://storage.googleapis.com/litert/binaries/latest/ (an unpinned
+binary) and fetch stb and sentencepiece. A build that must run with no
+network, or ship only source, cannot have that. The option defaults to ON,
+which keeps the current behaviour.
+
+Assisted-by: claude:opus-5.5
+---
+ tensor/CMakeLists.txt | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/tensor/CMakeLists.txt b/tensor/CMakeLists.txt
+index 75201af81..8ff35693e 100644
+--- a/tensor/CMakeLists.txt
++++ b/tensor/CMakeLists.txt
+@@ -120,10 +120,14 @@ target_link_libraries(litert_tensor_api_tflite_backend
+         absl::span
+ )
+ 
+-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/segmentation/CMakeLists.txt")
++# The examples download a prebuilt GPU accelerator library (from a "latest"
++# URL) and fetch stb and sentencepiece at configure time.
++option(LITERT_TENSOR_BUILD_EXAMPLES "Configure the tensor examples" ON)
++
++if(LITERT_TENSOR_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/segmentation/CMakeLists.txt")
+     add_subdirectory(examples/segmentation)
+ endif()
+ 
+-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/gemma3/CMakeLists.txt")
++if(LITERT_TENSOR_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/gemma3/CMakeLists.txt")
+     add_subdirectory(examples/gemma3)
+ endif()
+\ No newline at end of file
+-- 
+2.53.0
+

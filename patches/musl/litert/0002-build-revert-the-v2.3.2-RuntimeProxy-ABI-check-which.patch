@@ -1,7 +1,7 @@
 From 9fe8dfa5b7a48ce34cf60156ece2dedd17585b7d Mon Sep 17 00:00:00 2001
 From: Ian MacDonald <ian@netstatz.com>
 Date: Sat, 31 Oct 2026 01:16:52 -0400
-Subject: [PATCH 2/2] build: revert the v2.3.2 RuntimeProxy ABI check, which
+Subject: [PATCH 2/3] build: revert the v2.3.2 RuntimeProxy ABI check, which
  does not compile
 
 Revert c54e491a1ea0 ("Add ABI version checking for LiteRtRuntimeCApiStruct
