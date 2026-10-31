@@ -9,6 +9,8 @@ set -euo pipefail
 . "$(dirname "$(readlink -f "$0")")/env.sh"
 git -C "$LITERT_SRC" merge-base --is-ancestor "$LITERT_COMMIT" HEAD ||
   { echo "ABORT: $LITERT_SRC is not $LITERT_COMMIT (+ patches)"; exit 1; }
+[ "$(git -C "$FXDIV_SRC" rev-parse HEAD)" = "$FXDIV_COMMIT" ] ||
+  { echo "ABORT: $FXDIV_SRC is not $FXDIV_COMMIT"; exit 1; }
 [ -x "$HOST_FLATC_DIR/flatc" ] || { echo "ABORT: no host flatc in $HOST_FLATC_DIR"; exit 1; }
 echo "start $(date -u +%FT%TZ) arch=$ARCH litert=$(git -C "$LITERT_SRC" describe --tags --always) host flatc: $("$HOST_FLATC_DIR/flatc" --version)"
 L=$B/litert
@@ -24,6 +26,7 @@ cmake -S "$LITERT_SRC/litert" -B "$L" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DTFLITE_HOST_TOOLS_DIR="$HOST_FLATC_DIR" \
   -DLITERT_ENABLE_NPU=OFF -DLITERT_TENSOR_BUILD_EXAMPLES=OFF \
+  -DFXDIV_SOURCE_DIR="$FXDIV_SRC" \
   ${LITERT_CMAKE_EXTRA:-} > "$L/cfg.log" 2>&1
 if grep -q -a "fetching FlatBuffers to build flatc" "$L/cfg.log"; then
   echo "ABORT: flatc would be built as a target binary"; exit 1

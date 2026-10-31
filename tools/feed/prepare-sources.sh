@@ -15,3 +15,4 @@ prep() {  # dir url commit patchdir
 }
 prep "$LITERT_SRC" https://github.com/google-ai-edge/LiteRT.git "$LITERT_COMMIT" "$P/litert"
 prep "$TOKENIZERS_SRC" https://github.com/mlc-ai/tokenizers-cpp.git "$TOKENIZERS_COMMIT" "$P/tokenizers-cpp"
+prep "$FXDIV_SRC" https://github.com/Maratyszcza/FXdiv.git "$FXDIV_COMMIT" "$P/FXdiv"

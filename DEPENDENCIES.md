@@ -39,7 +39,7 @@ which XNNPACK and pthreadpool read instead of downloading.
 | TensorFlow (TFLite sources, `B/tflite_build/tensorflow-src`) | https://github.com/tensorflow/tensorflow | `a344c313f75bbe28d00abe63f5d49cd6f233b6d0` (tag v2.21.0-rc0) | Apache-2.0 | `B/tflite_build/tensorflow-src` |
 | XNNPACK | https://github.com/google/XNNPACK | `d89ef6669a14db203b3b7935b1b3862cb63fb6df` | BSD-3-Clause | `B/xnnpack` |
 | pthreadpool (XNNPACK) | https://github.com/google/pthreadpool/archive/15a6644ba1c45f1acc16ac1e883efc3e56c6bed2.zip | sha256 `9b9fb1179b71021c0c048504eab636424c58e9c8374404754ece6d7cd90f26d4` | BSD-2-Clause | `B/pthreadpool-source` + `-DPTHREADPOOL_SOURCE_DIR` |
-| FXdiv (pthreadpool) | https://github.com/Maratyszcza/FXdiv | `63058eff77e11aa15bf531df5dd34395ec3017c8` (**unpinned upstream: `GIT_TAG master`**) | MIT | `B/FXdiv-source` + `-DFXDIV_SOURCE_DIR` |
+| FXdiv (pthreadpool) | https://github.com/Maratyszcza/FXdiv | `63058eff77e11aa15bf531df5dd34395ec3017c8` (pthreadpool asks for `master`; the feed scripts pin this commit) | MIT | `B/FXdiv-source` + `-DFXDIV_SOURCE_DIR` |
 | FP16 | https://github.com/Maratyszcza/FP16/archive/0a92994d729ff76a58f692d3028ca1b64b145d91.zip | sha256 `e66e65515fa09927b348d3d584c68be4215cfe664100d01c9dbc7655a5716d70` | MIT | `B/FP16-source` + `-DFP16_SOURCE_DIR` |
 | cpuinfo | https://github.com/pytorch/cpuinfo | `8ce83db858065145192c97af90cb668ad72a12e9` | BSD-2-Clause | `B/cpuinfo` |
 | eigen | https://gitlab.com/libeigen/eigen | `ea13a98decd497a8c5588fb5de71b57bcf10d864` | MPL-2.0 (built with `EIGEN_MPL2_ONLY`) | `B/eigen` |
@@ -201,8 +201,8 @@ online one (10,891,128 vs 10,895,224 bytes): embedded source paths differ.
   AI LiteCore (soc-developer.semiconductor.samsung.com, with prebuilt `.so` compilers). Unpatched
   LiteRT v2.3.2 and v2.2.0 download all three at configure time; the v0.3.0 release build did too
   (the v2.2.0 trees on ai4 hold `_deps/qnn_headers` and `_deps/litecore_headers`; nothing linked them).
-- FXdiv is fetched at `master` by pthreadpool's CMake; pin it with `FXDIV_SOURCE_DIR` at the
-  commit above.
+- FXdiv: pthreadpool's CMake asks for `master`. `tools/feed/prepare-sources.sh` checks out the commit
+  above and `tools/feed/build-litert.sh` passes it as `FXDIV_SOURCE_DIR`, refusing any other commit.
 - Unpinned prebuilt binary, NOT fetched by this build: `libLiteRtWebGpuAccelerator.so` from a
   "latest" URL (unpatched LiteRT downloads it at configure time; patch 0003).
 - Fetched but not in the binary: protobuf (no protobuf symbol or string in the linked x86_64

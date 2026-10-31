@@ -7,6 +7,9 @@ LITERT_SRC=${LITERT_SRC:-$F/litert-src}
 LITERT_COMMIT=c54e491a1ea07abdb931233eadf2f432db656997   # v2.3.2
 TOKENIZERS_SRC=${TOKENIZERS_SRC:-$F/tokenizers-cpp}
 TOKENIZERS_COMMIT=c586c52f93f7b060753bd2388eb96a105cb7374d
+# pthreadpool fetches FXdiv at `master`; the feed pins the commit the release resolved.
+FXDIV_SRC=${FXDIV_SRC:-$F/FXdiv}
+FXDIV_COMMIT=63058eff77e11aa15bf531df5dd34395ec3017c8
 HOST_FLATC_DIR=${HOST_FLATC_DIR:-$R/host-flatc}         # a HOST flatc 25.9.23
 B=${B:-$F/build/$ARCH}
 JOBS=${JOBS:-12}
