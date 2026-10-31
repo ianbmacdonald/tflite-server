@@ -9,6 +9,7 @@ VER=$1
 ARCH=${2:-x86_64}
 R=${R:-$HOME/build-litert}
 SRC=$(cd "$(dirname "$0")" && pwd)
+LS=${LITERT_SRC:-$R/litert-v220}
 case "$ARCH" in
 x86_64)
   SD=$R/prplos-5.1-staging; T=$SD/toolchain-x86_64_gcc-13.3.0_musl/bin/x86_64-openwrt-linux-musl-
@@ -37,7 +38,7 @@ rm -rf "$B" && mkdir -p "$B/bin" "$L"
 cp "$BLD/tflite-server.stripped" "$B/bin/tflite-server"
 cp "$SRC/LICENSE" "$SRC/NOTICE" "$SRC/README.md" "$B/"
 # LiteRT and what its CMake build vendors and compiles in.
-need "$R/litert-v220/LICENSE" LiteRT-LICENSE
+need "$LS/LICENSE" LiteRT-LICENSE
 need "$LB/tflite_build/tensorflow-src/LICENSE" TensorFlow-LICENSE
 need "$LB/xnnpack/LICENSE" XNNPACK-LICENSE
 need "$LB/cpuinfo/LICENSE" cpuinfo-LICENSE
@@ -74,7 +75,7 @@ OPS=$(grep -E '^TFLITE_SERVER_OPS:' "$BLD/CMakeCache.txt" | cut -d= -f2-)
 {
   echo "tflite-server $VER, musl-native for $HOST."
   echo "Source: https://github.com/ianbmacdonald/tflite-server @ $(git -C "$SRC" rev-parse --short HEAD)"
-  echo "LiteRT: $(git -C "$R/litert-v220" rev-parse --short HEAD) (v2.2.0), static, $(basename "$LB")."
+  echo "LiteRT: $(git -C "$LS" rev-parse --short HEAD) ($(git -C "$LS" describe --tags)), static, $(basename "$LB")."
   if [ -n "$OPS" ] && [ "$OPS" != all ]; then
     echo "Operators: curated, $(basename "$OPS") ($(grep -v '^#' "$OPS" | grep -c .) TFLite builtin ops: the union over the six use cases"
     echo "  of the gateway study - text classification, sentence embeddings, image classification, object detection,"

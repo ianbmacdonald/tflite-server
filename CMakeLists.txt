@@ -56,7 +56,7 @@ if(TFLITE_SERVER_PREPROCESS_TESTS)
 endif()
 
 # LiteRT is consumed as a CMake build tree of the LiteRT repo (static libraries),
-# e.g. built with prpl-harness build/litert/litert-v2.2.0-musl-build.sh.
+# e.g. built with tools/feed/build-litert.sh.
 set(LITERT_SRC "" CACHE PATH "LiteRT source checkout (the repo root that contains litert/ and tflite/)")
 set(LITERT_BUILD "" CACHE PATH "LiteRT CMake build tree (configured from <LITERT_SRC>/litert)")
 # tokenizers-cpp's Rust C shim, built for the target (cargo build --release --target ...).

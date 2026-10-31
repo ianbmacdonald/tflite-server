@@ -1,0 +1,39 @@
+From 8d75e72fea7bc86f72a50958ba0e86ca598997ea Mon Sep 17 00:00:00 2001
+From: Ian MacDonald <ian@netstatz.com>
+Date: Sat, 31 Oct 2026 00:56:13 -0400
+Subject: [PATCH] build: skip the vendor NPU dispatch tree when
+ LITERT_ENABLE_NPU=OFF
+
+litert/vendors/CMakeLists.txt downloads the Qualcomm QAIRT, MediaTek
+NeuroPilot and Samsung AI LiteCore SDK headers at configure time and turns
+the Qualcomm and Samsung dispatch builds on, whatever LITERT_ENABLE_NPU
+says. A CPU-only build needs none of them, and their licences keep them
+out of a build that must ship its full source or run with no network.
+No target outside litert/vendors links a target defined there.
+
+Assisted-by: claude:opus-5.5
+---
+ litert/CMakeLists.txt | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/litert/CMakeLists.txt b/litert/CMakeLists.txt
+index 6722ade1b..8a7bfa46a 100644
+--- a/litert/CMakeLists.txt
++++ b/litert/CMakeLists.txt
+@@ -277,7 +277,12 @@ add_subdirectory(cc)
+ add_subdirectory(core)
+ add_subdirectory(runtime)
+ add_subdirectory(compiler)
+-add_subdirectory(vendors)
++# The vendor dispatch libraries download proprietary NPU SDK headers at configure
++# time (Qualcomm QAIRT, MediaTek NeuroPilot, Samsung AI LiteCore); a CPU-only
++# build (LITERT_ENABLE_NPU=OFF) needs none of them.
++if(LITERT_ENABLE_NPU)
++  add_subdirectory(vendors)
++endif()
+ add_subdirectory(tools)
+ add_subdirectory(experimental/custom_ops/gated_delta_net)
+ 
+-- 
+2.53.0
+
