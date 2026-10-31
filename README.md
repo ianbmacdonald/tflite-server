@@ -254,18 +254,28 @@ uploads a third request gets 503 after the 30 s admission wait (the check takes 
 
 ## Build: curated (default) or general
 
-The default build registers only the curated op set, `ops/usecase-all.txt`: the 48 TFLite builtin
-ops of every model of the six use cases Lemonade's gateway study covers (text classification, sentence
+The default build registers only the curated op set, `ops/usecase-all.txt`, 50 TFLite builtin
+ops: the 48 of every model of the six use cases Lemonade's gateway study covers (text classification, sentence
 embeddings, image classification, object detection, audio, time series; 17 models, among them the
-DistilBERT text export and MobileNetV2). It is the release build. A model with an op outside the list
-fails to load with `Didn't find op for builtin opcode`. The general build registers every TFLite
-builtin op, for development hosts and models outside the curated set:
+DistilBERT text export and MobileNetV2), plus the zero-shot and decision models in
+`ops/usecase-zeroshot.txt`: GLiClass-Edge v3.0, Julia-1 and Laya (litert-community exports) and
+gliclass-modern-base-v3.0 (exported with `tools/zeroshot/export_gliclass_modern.py`). They add
+`DEQUANTIZE` (the float16-weight graphs) and `LESS_EQUAL` (ModernBERT-base's local-attention
+mask). It is the release build. A model with an op outside the list fails to load with
+`Didn't find op for builtin opcode`. The general build registers every TFLite builtin op, for
+development hosts and models outside the curated set:
 
 ```bash
-cmake ... -DTFLITE_SERVER_OPS=all                    # general build
+cmake ... -DTFLITE_SERVER_OPS=all                    # general build (opt-in)
 cmake ... -DTFLITE_SERVER_OPS=my-ops.txt             # your own list
 python tools/tflite_ops.py text/model.tflite image/model.tflite > my-ops.txt
 ```
+
+The zero-shot and decision models take a label list or option list with each request, which
+`/classify` does not; `tools/tflite-run` (`-DTFLITE_SERVER_BUILD_TFLITE_RUN=ON`) runs them through
+the same LiteRT path and op registration to check that a build can load and run them;
+`tools/zeroshot/gliclass_io.py` and `julia_io.py` build one request's input tensors and read the
+answer.
 
 `cmake/SelectedOps.cmake` copies LiteRT's `register.cc` and `register_ref.cc` with every `AddBuiltin`
 not in the list removed and compiles them into the server, so the linker never pulls the archive

@@ -16,6 +16,7 @@
 # audio/yamnet: 25 ops
 # ts/conv_ae: 9 ops
 # ts/lstm: 8 ops
+# zero-shot and decision models, ops/usecase-zeroshot.txt: adds DEQUANTIZE (float16-weight graphs) and LESS_EQUAL (ModernBERT-base local attention)
 ABS
 ADD
 AVERAGE_POOL_2D
@@ -27,6 +28,7 @@ CONCATENATION
 CONV_2D
 CUSTOM:TFLite_Detection_PostProcess
 DEPTHWISE_CONV_2D
+DEQUANTIZE
 DIV
 EMBEDDING_LOOKUP
 EXP
@@ -36,6 +38,7 @@ GATHER
 GATHER_ND
 GELU
 HARD_SWISH
+LESS_EQUAL
 LOG
 LOGICAL_AND
 LOGISTIC

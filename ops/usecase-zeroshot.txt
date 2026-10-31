@@ -1,0 +1,27 @@
+# use case zero-shot / decision: tflite ops = union over 5 graph(s), tools/tflite_ops.py
+# knowledgator/gliclass-modern-base-v3.0 gliclass_modern_base_s128_fp32 (tools/feed export): 20 ops
+# litert-community/GLiClass-Edge-v3.0-LiteRT gliclass_edge_v3_s128_fp32: 14 ops
+# litert-community/Julia-1-LiteRT julia1_s512_fp32: 14 ops
+# litert-community/laya-LiteRT laya_en_s512_wfp16: 16 ops
+# litert-community/laya-LiteRT laya_act_head_fp32: 3 ops
+ABS
+ADD
+BATCH_MATMUL
+BROADCAST_TO
+CAST
+CONCATENATION
+DEQUANTIZE
+EMBEDDING_LOOKUP
+FULLY_CONNECTED
+GELU
+LESS_EQUAL
+MEAN
+MUL
+RESHAPE
+RSQRT
+SELECT_V2
+SLICE
+SOFTMAX
+SQUARED_DIFFERENCE
+SUB
+TRANSPOSE
