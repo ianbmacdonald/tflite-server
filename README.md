@@ -121,6 +121,8 @@ tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [-
   for the NPU through a vendor dispatch library. If that fails (no dispatch library, no device, or a
   model the NPU cannot run), the server logs the reason and loads the model on the CPU instead.
   `GET /health` names the accelerator in use. `--threads` and `--weight-cache` apply to the CPU only.
+  A vendor dispatch library links the shared LiteRT runtime, so the NPU needs a server built with
+  `TFLITE_SERVER_LITERT_SHARED` (see Build); a static build falls back to the CPU.
 - `--dispatch-library-dir DIR`: the directory LiteRT searches for the vendor dispatch library
   (`libLiteRtDispatch_<vendor>.so`). Used only with `--accelerator npu`.
 
@@ -292,6 +294,13 @@ not in the list removed and compiles them into the server, so the linker never p
 members that would register (and link) the other kernels. `ops/usecase-<case>.txt` lists each use
 case on its own; `ops/text-distilbert.txt` and `ops/text-image-distilbert-mobilenetv2.txt` the two
 models of v0.2.0.
+
+`TFLITE_SERVER_LITERT_SHARED` (default OFF) links the shared runtime `LITERT_BUILD/c/libLiteRt.so`
+instead of the static archives. Use it when the server is to load a vendor NPU dispatch library
+(`--accelerator npu`): that library links `libLiteRt.so` itself, and the process must hold one copy
+of the runtime. The runtime then comes from the host's library path (no build-tree RPATH is
+written), and it registers every builtin op, so `TFLITE_SERVER_OPS` does not apply. `LITERT_BUILD`
+may also be a staged (installed) LiteRT tree without a `CMakeCache.txt`.
 
 `TFLITE_SERVER_GC_SECTIONS` (default ON) compiles with `-ffunction-sections -fdata-sections` and
 links with `--gc-sections`. It drops the unused parts of the Rust tokenizer library in any case, and
