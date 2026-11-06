@@ -375,7 +375,8 @@ void collect_inserted_special_ids(const json& pp, std::set<int64_t>& out) {
 
 class Model {
 public:
-    Model(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
+    Model(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose,
+          const AcceleratorConfig& accel)
         : manifest_(load_manifest(dir)) {
         (void)verbose;
         std::string blob = load_bytes(dir / "tokenizer.json");
@@ -423,7 +424,7 @@ public:
         }
 
         threads = resolve_threads(threads);
-        lm_ = make_compiled_model(dir / "model.tflite", threads, weight_cache);
+        lm_ = make_compiled_model(dir / "model.tflite", threads, weight_cache, accel);
         litert::CompiledModel* model_ = lm_.model.get();
 
         // Each signature is the same graph at one fixed sequence length (the
@@ -619,6 +620,8 @@ public:
         return json{{"labels", labels}};
     }
 
+    const std::string& accelerator() const { return lm_.accelerator; }
+
 private:
     CompiledLiteRt lm_;
     struct Signature {
@@ -641,16 +644,20 @@ private:
 }  // namespace
 
 struct TextModel::Impl {
-    Impl(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
-        : model(dir, threads, weight_cache, verbose) {}
+    Impl(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose,
+         const AcceleratorConfig& accel)
+        : model(dir, threads, weight_cache, verbose, accel) {}
     Model model;
 };
 
-TextModel::TextModel(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose)
-    : impl_(std::make_unique<Impl>(dir, threads, weight_cache, verbose)) {}
+TextModel::TextModel(const fs::path& dir, int threads, const std::string& weight_cache, bool verbose,
+                     const AcceleratorConfig& accel)
+    : impl_(std::make_unique<Impl>(dir, threads, weight_cache, verbose, accel)) {}
 
 TextModel::~TextModel() = default;
 
 json TextModel::classify(const std::string& text, int top_k) { return impl_->model.classify(text, top_k); }
+
+const std::string& TextModel::accelerator() const { return impl_->model.accelerator(); }
 
 const std::string& TextModel::task() const { return impl_->model.task(); }

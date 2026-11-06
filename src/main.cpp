@@ -13,6 +13,7 @@
 #include "flat_json.h"
 #include "image_model.h"
 #include "image_preprocess.h"
+#include "litert_engine.h"
 #include "text_model.h"
 
 #include <pthread.h>
@@ -47,6 +48,8 @@ struct Args {
     int port = 0;
     int threads = 0;  // 0: one per hardware thread
     std::string weight_cache;  // XNNPACK packed-weight cache file; empty = in memory
+    std::string accelerator = "cpu";   // "cpu" or "npu"; an unavailable NPU falls back to CPU
+    std::string dispatch_library_dir;  // searched for libLiteRtDispatch_*.so when accelerator=npu
     bool verbose = false;
     uint64_t max_image_bytes = 16u << 20;
     uint64_t max_image_pixels = 4000000;
@@ -61,7 +64,8 @@ const char* kUsage =
     "usage: tflite-server --model-path <dir> --port <n> [--host ADDR] [--threads N] [--weight-cache FILE] [--verbose]\n"
     "  image models: [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]\n"
     "                [--decode-budget-factor N] [--max-decode-bytes N]\n"
-    "  all models:   [--http-threads 2..16] [--oom-score-adj 0..1000]";
+    "  all models:   [--accelerator cpu|npu] [--dispatch-library-dir DIR]\n"
+    "                [--http-threads 2..16] [--oom-score-adj 0..1000]";
 
 long long parse_int(const std::string& flag, const char* v) {
     size_t pos = 0;
@@ -85,6 +89,8 @@ Args parse_args(int argc, char** argv) {
         else if (f == "--host" && has_value) a.host = argv[++i];
         else if (f == "--threads" && has_value) a.threads = static_cast<int>(parse_int(f, argv[++i]));
         else if (f == "--weight-cache" && has_value) a.weight_cache = argv[++i];
+        else if (f == "--accelerator" && has_value) a.accelerator = argv[++i];
+        else if (f == "--dispatch-library-dir" && has_value) a.dispatch_library_dir = argv[++i];
         else if (f == "--verbose") a.verbose = true;
         else if (f == "--max-image-bytes" && has_value) a.max_image_bytes = parse_int(f, argv[++i]);
         else if (f == "--max-image-pixels" && has_value) a.max_image_pixels = parse_int(f, argv[++i]);
@@ -99,6 +105,9 @@ Args parse_args(int argc, char** argv) {
         }
     }
     if (a.model_path.empty() || a.port == 0 || a.host.empty()) throw std::runtime_error(kUsage);
+    if (a.accelerator != "cpu" && a.accelerator != "npu") {
+        throw std::runtime_error("--accelerator must be cpu or npu\n" + std::string(kUsage));
+    }
     if (a.max_image_bytes < 1024 || a.max_image_bytes > (256ull << 20)) {
         throw std::runtime_error("--max-image-bytes must be from 1024 to 268435456");
     }
@@ -353,6 +362,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<TextModel> text;
         std::unique_ptr<ImageModel> image;
         std::string task;
+        const AcceleratorConfig accel{args.accelerator, args.dispatch_library_dir};
         if (manifest_task(args.model_path) == "image-classification") {
             ImageServeOptions opts;
             opts.max_image_bytes = args.max_image_bytes;
@@ -361,11 +371,11 @@ int main(int argc, char** argv) {
             opts.limits.max_budget = args.max_decode_bytes;
             opts.max_concurrent_decodes = args.max_concurrent_decodes;
             image = std::make_unique<ImageModel>(args.model_path, args.threads, args.weight_cache, opts,
-                                                 args.verbose);
+                                                 args.verbose, accel);
             task = "image-classification";
         } else {
             text = std::make_unique<TextModel>(args.model_path, args.threads, args.weight_cache,
-                                               args.verbose);
+                                               args.verbose, accel);
             task = text->task();
         }
 
@@ -401,7 +411,11 @@ int main(int argc, char** argv) {
         }
 
         srv.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
-            res.set_content(json{{"status", "ok"}, {"engine", "litert"}, {"task", task}, {"version", kVersion}}.dump(),
+            res.set_content(json{{"status", "ok"},
+                                 {"engine", "litert"},
+                                 {"task", task},
+                                 {"accelerator", image ? image->accelerator() : text->accelerator()},
+                                 {"version", kVersion}}.dump(),
                             "application/json");
         });
         srv.Post("/classify", [&](const httplib::Request& req, httplib::Response& res) {

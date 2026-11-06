@@ -61,13 +61,13 @@ struct ImageModel::Impl {
     std::mutex run_mutex;
 
     Impl(const fs::path& dir, int threads, const std::string& weight_cache,
-         const ImageServeOptions& opts, bool verbose)
+         const ImageServeOptions& opts, bool verbose, const AcceleratorConfig& accel)
         : manifest(load_image_manifest(dir)),
           labels(load_labels(dir / manifest.labels_file)),
           options(opts),
           decode_slots(opts.max_concurrent_decodes) {
         threads = resolve_threads(threads);
-        lm = make_compiled_model(dir / "model.tflite", threads, weight_cache);
+        lm = make_compiled_model(dir / "model.tflite", threads, weight_cache, accel);
         // A model exported without SignatureDefs (the TF MobileNet .tflite
         // files) still gets LiteRT's default signature at index 0.
         if (lm.model->GetNumSignatures() < 1) throw std::runtime_error("model.tflite has no signatures");
@@ -215,11 +215,14 @@ struct ImageModel::Impl {
 };
 
 ImageModel::ImageModel(const fs::path& dir, int threads, const std::string& weight_cache,
-                       const ImageServeOptions& options, bool verbose)
-    : impl_(std::make_unique<Impl>(dir, threads, weight_cache, options, verbose)) {}
+                       const ImageServeOptions& options, bool verbose,
+                       const AcceleratorConfig& accel)
+    : impl_(std::make_unique<Impl>(dir, threads, weight_cache, options, verbose, accel)) {}
 
 ImageModel::~ImageModel() = default;
 
 json ImageModel::classify(std::string_view image_bytes, int top_k) {
     return impl_->classify(image_bytes, top_k);
 }
+
+const std::string& ImageModel::accelerator() const { return impl_->lm.accelerator; }

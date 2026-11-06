@@ -87,7 +87,7 @@ builds the directory for TF MobileNetV2 1.0 224 fp32 (`mobilenet_v2_1.0_224.tfli
 tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [--weight-cache FILE] [--verbose]
               [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]
               [--decode-budget-factor N] [--max-decode-bytes N] [--http-threads 2..16]
-              [--oom-score-adj 0..1000]
+              [--oom-score-adj 0..1000] [--accelerator cpu|npu] [--dispatch-library-dir DIR]
 ```
 
 - `--host ADDR` (default 127.0.0.1): the address to listen on. `0.0.0.0` listens on every
@@ -117,13 +117,19 @@ tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [-
   503), so extra threads hold waiting connections, not buffered bodies.
 - `--oom-score-adj N` (default 0, unchanged): Linux only. Raising it needs no privilege and
   makes this process the OOM killer's first choice over the processes it shares a host with.
+- `--accelerator cpu|npu` (default `cpu`): the LiteRT hardware accelerator. `npu` compiles the model
+  for the NPU through a vendor dispatch library. If that fails (no dispatch library, no device, or a
+  model the NPU cannot run), the server logs the reason and loads the model on the CPU instead.
+  `GET /health` names the accelerator in use. `--threads` and `--weight-cache` apply to the CPU only.
+- `--dispatch-library-dir DIR`: the directory LiteRT searches for the vendor dispatch library
+  (`libLiteRtDispatch_<vendor>.so`). Used only with `--accelerator npu`.
 
 Recommended on a small gateway: `--max-image-pixels 4000000 --max-concurrent-decodes 1
 --http-threads 4 --oom-score-adj 500`.
 
 Endpoints:
 
-- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.4.1"}`, where
+- `GET /health` returns `{"status":"ok","engine":"litert","accelerator":"cpu","task":"...","version":"0.4.1"}`, where
   `task` is `image-classification`, `text-classification` or `token-classification`.
 - `POST /classify {"input": "...", "top_k": 2}` returns `{"labels": {"LABEL_1": 0.98, ...}}`.
   On an image model it is a 400.
