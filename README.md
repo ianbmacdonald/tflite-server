@@ -23,6 +23,7 @@ model-dir/
   config.json            # stock HF config (model_type is checked against the allowlist)
   tokenizer_config.json  # model_max_length
   manifest.json          # OPTIONAL explicit contract, same schema as ort-server
+  model.npu.tflite       # OPTIONAL ahead-of-time NPU build of model.tflite (see below)
 ```
 
 Each signature is the same graph at one fixed sequence length. The exporter writes `seq_64`,
@@ -43,6 +44,7 @@ model-dir/
   model.tflite    # one float32 input [1, H, W, 3] (NHWC RGB), one float32 output with N scores
   labels.txt      # N lines; line i names output index i
   manifest.json   # required, see below
+  model.npu.tflite # OPTIONAL ahead-of-time NPU build of model.tflite (see below)
 ```
 
 ```json
@@ -80,6 +82,13 @@ models are refused at load.
 builds the directory for TF MobileNetV2 1.0 224 fp32 (`mobilenet_v2_1.0_224.tflite`, sha256
 `9f3bc29e38e90842a852bfed957dbf5e36f2d97a91dd17736b1e5c0aca8d3303`, Apache-2.0) with the TensorFlow `ImageNetLabels.txt` (1001 lines, index
 0 is `background`, sha256 `536feacc519de3d418de26b2effb4d75694a8c4c0063e36499a46fa8061e2da9`). With local files it fetches nothing.
+
+### Ahead-of-time NPU payload
+
+Some NPUs run only a model compiled ahead of time by the vendor's tool. Put that build beside the
+portable model as `model.npu.tflite`. With `--accelerator npu` the server loads `model.npu.tflite`
+when the directory holds one, else `model.tflite`. The CPU, including the fallback when the NPU is
+not available, always loads `model.tflite`, so one directory serves both.
 
 ## Run
 

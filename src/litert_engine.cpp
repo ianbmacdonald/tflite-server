@@ -1,5 +1,7 @@
 #include "litert_engine.h"
 
+#include "model_variant.h"
+
 #include "litert/cc/litert_common.h"
 #include "litert/cc/litert_environment_options.h"
 #include "litert/cc/litert_options.h"
@@ -63,12 +65,16 @@ CompiledLiteRt make_compiled_model(const std::filesystem::path& model_file, int 
         throw std::runtime_error("unknown accelerator '" + accel.kind + "' (use cpu or npu)");
     }
     if (accel.kind == "npu") {
+        // An ahead-of-time payload, when the model directory ships one; the
+        // CPU fallback below keeps the portable model, which is the only one
+        // it can run.
+        const std::filesystem::path npu_file = select_model_file(model_file, true);
         try {
-            return compile_on(true, model_file, threads, weight_cache, accel);
+            return compile_on(true, npu_file, threads, weight_cache, accel);
         } catch (const std::exception& e) {
             std::fprintf(stderr,
                          "tflite-server: NPU unavailable for %s (%s); falling back to CPU\n",
-                         model_file.string().c_str(), e.what());
+                         npu_file.string().c_str(), e.what());
         }
     }
     return compile_on(false, model_file, threads, weight_cache, accel);

@@ -48,11 +48,14 @@ if(TFLITE_SERVER_PREPROCESS_TESTS)
   target_link_libraries(test_flat_json PRIVATE tflite_image)
   add_executable(fuzz_image_decode tests/fuzz_image_decode.cpp)
   target_link_libraries(fuzz_image_decode PRIVATE tflite_image)
+  add_executable(test_model_variant tests/test_model_variant.cpp)
+  target_link_libraries(test_model_variant PRIVATE tflite_image)
   add_test(NAME image_preprocess
     COMMAND test_image_preprocess "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   add_test(NAME image_manifest
     COMMAND test_image_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   add_test(NAME flat_json COMMAND test_flat_json)
+  add_test(NAME model_variant COMMAND test_model_variant)
   add_test(NAME image_decode_fuzz_smoke
     COMMAND fuzz_image_decode "${CMAKE_CURRENT_SOURCE_DIR}/tests/data" 2000)
 endif()
