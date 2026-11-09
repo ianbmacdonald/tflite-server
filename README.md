@@ -23,6 +23,7 @@ model-dir/
   config.json            # stock HF config (model_type is checked against the allowlist)
   tokenizer_config.json  # model_max_length
   manifest.json          # OPTIONAL explicit contract, same schema as ort-server
+  model.npu.tflite       # OPTIONAL ahead-of-time NPU build of model.tflite (see below)
 ```
 
 Each signature is the same graph at one fixed sequence length. The exporter writes `seq_64`,
@@ -43,6 +44,7 @@ model-dir/
   model.tflite    # one float32 input [1, H, W, 3] (NHWC RGB), one float32 output with N scores
   labels.txt      # N lines; line i names output index i
   manifest.json   # required, see below
+  model.npu.tflite # OPTIONAL ahead-of-time NPU build of model.tflite (see below)
 ```
 
 ```json
@@ -81,13 +83,20 @@ builds the directory for TF MobileNetV2 1.0 224 fp32 (`mobilenet_v2_1.0_224.tfli
 `9f3bc29e38e90842a852bfed957dbf5e36f2d97a91dd17736b1e5c0aca8d3303`, Apache-2.0) with the TensorFlow `ImageNetLabels.txt` (1001 lines, index
 0 is `background`, sha256 `536feacc519de3d418de26b2effb4d75694a8c4c0063e36499a46fa8061e2da9`). With local files it fetches nothing.
 
+### Ahead-of-time NPU payload
+
+Some NPUs run only a model compiled ahead of time by the vendor's tool. Put that build beside the
+portable model as `model.npu.tflite`. With `--accelerator npu` the server loads `model.npu.tflite`
+when the directory holds one, else `model.tflite`. The CPU, including the fallback when the NPU is
+not available, always loads `model.tflite`, so one directory serves both.
+
 ## Run
 
 ```bash
 tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [--weight-cache FILE] [--verbose]
               [--max-image-bytes N] [--max-image-pixels N] [--max-concurrent-decodes 1..2]
               [--decode-budget-factor N] [--max-decode-bytes N] [--http-threads 2..16]
-              [--oom-score-adj 0..1000]
+              [--oom-score-adj 0..1000] [--accelerator cpu|npu] [--dispatch-library-dir DIR]
 ```
 
 - `--host ADDR` (default 127.0.0.1): the address to listen on. `0.0.0.0` listens on every
@@ -117,13 +126,21 @@ tflite-server --model-path <model-dir> --port <n> [--host ADDR] [--threads N] [-
   503), so extra threads hold waiting connections, not buffered bodies.
 - `--oom-score-adj N` (default 0, unchanged): Linux only. Raising it needs no privilege and
   makes this process the OOM killer's first choice over the processes it shares a host with.
+- `--accelerator cpu|npu` (default `cpu`): the LiteRT hardware accelerator. `npu` compiles the model
+  for the NPU through a vendor dispatch library. If that fails (no dispatch library, no device, or a
+  model the NPU cannot run), the server logs the reason and loads the model on the CPU instead.
+  `GET /health` names the accelerator in use. `--threads` and `--weight-cache` apply to the CPU only.
+  A vendor dispatch library links the shared LiteRT runtime, so the NPU needs a server built with
+  `TFLITE_SERVER_LITERT_SHARED` (see Build); a static build falls back to the CPU.
+- `--dispatch-library-dir DIR`: the directory LiteRT searches for the vendor dispatch library
+  (`libLiteRtDispatch_<vendor>.so`). Used only with `--accelerator npu`.
 
 Recommended on a small gateway: `--max-image-pixels 4000000 --max-concurrent-decodes 1
 --http-threads 4 --oom-score-adj 500`.
 
 Endpoints:
 
-- `GET /health` returns `{"status":"ok","engine":"litert","task":"...","version":"0.4.1"}`, where
+- `GET /health` returns `{"status":"ok","engine":"litert","accelerator":"cpu","task":"...","version":"0.4.1"}`, where
   `task` is `image-classification`, `text-classification` or `token-classification`.
 - `POST /classify {"input": "...", "top_k": 2}` returns `{"labels": {"LABEL_1": 0.98, ...}}`.
   On an image model it is a 400.
@@ -286,6 +303,13 @@ not in the list removed and compiles them into the server, so the linker never p
 members that would register (and link) the other kernels. `ops/usecase-<case>.txt` lists each use
 case on its own; `ops/text-distilbert.txt` and `ops/text-image-distilbert-mobilenetv2.txt` the two
 models of v0.2.0.
+
+`TFLITE_SERVER_LITERT_SHARED` (default OFF) links the shared runtime `LITERT_BUILD/c/libLiteRt.so`
+instead of the static archives. Use it when the server is to load a vendor NPU dispatch library
+(`--accelerator npu`): that library links `libLiteRt.so` itself, and the process must hold one copy
+of the runtime. The runtime then comes from the host's library path (no build-tree RPATH is
+written), and it registers every builtin op, so `TFLITE_SERVER_OPS` does not apply. `LITERT_BUILD`
+may also be a staged (installed) LiteRT tree without a `CMakeCache.txt`.
 
 `TFLITE_SERVER_GC_SECTIONS` (default ON) compiles with `-ffunction-sections -fdata-sections` and
 links with `--gc-sections`. It drops the unused parts of the Rust tokenizer library in any case, and

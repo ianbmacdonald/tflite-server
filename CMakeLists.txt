@@ -10,6 +10,8 @@ set(TFLITE_SERVER_OPS "${CMAKE_CURRENT_SOURCE_DIR}/ops/usecase-all.txt" CACHE ST
   "Register only the TFLite builtin ops listed in this file (one per line; tools/tflite_ops.py writes one from models). Default: the curated set, ops/usecase-all.txt. 'all': every builtin op (the general build)")
 option(TFLITE_SERVER_GC_SECTIONS
   "Compile with -ffunction-sections -fdata-sections and link with --gc-sections" ON)
+option(TFLITE_SERVER_LITERT_SHARED
+  "Link LiteRT as its shared runtime, libLiteRt.so from LITERT_BUILD, instead of the static archives. Use this when runtime-pluggable NPU dispatch libraries are expected: they link libLiteRt.so themselves, and the process must hold exactly one copy of the runtime" OFF)
 option(TFLITE_SERVER_BUILD_TFLITE_RUN
   "Also build tools/tflite-run (runs one signature on raw inputs, same LiteRT path and op registration)" OFF)
 
@@ -46,11 +48,14 @@ if(TFLITE_SERVER_PREPROCESS_TESTS)
   target_link_libraries(test_flat_json PRIVATE tflite_image)
   add_executable(fuzz_image_decode tests/fuzz_image_decode.cpp)
   target_link_libraries(fuzz_image_decode PRIVATE tflite_image)
+  add_executable(test_model_variant tests/test_model_variant.cpp)
+  target_link_libraries(test_model_variant PRIVATE tflite_image)
   add_test(NAME image_preprocess
     COMMAND test_image_preprocess "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   add_test(NAME image_manifest
     COMMAND test_image_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   add_test(NAME flat_json COMMAND test_flat_json)
+  add_test(NAME model_variant COMMAND test_model_variant)
   add_test(NAME image_decode_fuzz_smoke
     COMMAND fuzz_image_decode "${CMAKE_CURRENT_SOURCE_DIR}/tests/data" 2000)
 endif()
@@ -78,17 +83,13 @@ endif()
 
 FetchContent_MakeAvailable(httplib)
 
-# Every static archive of the LiteRT build except its CLI tools and test/bench
-# harnesses, linked as one group: the dependency order inside LiteRT's tree is
-# long and cyclic, and the linker keeps only the objects actually referenced.
-file(GLOB_RECURSE _litert_archives "${LITERT_BUILD}/*.a")
-list(FILTER _litert_archives EXCLUDE REGEX "/(tools|gtest|gmock|googletest|benchmark)[^/]*/")
-list(FILTER _litert_archives EXCLUDE REGEX "(gtest|gmock|benchmark)[^/]*\\.a$")
-list(FILTER _litert_archives EXCLUDE REGEX "/testdata/|-src/")
 # Source trees LiteRT compiled against: fetched into the LiteRT build, or the local copies an
 # offline LiteRT build was given (TENSORFLOW_SOURCE_DIR, FETCHCONTENT_SOURCE_DIR_<NAME>).
-load_cache("${LITERT_BUILD}" READ_WITH_PREFIX _litert_
-  TENSORFLOW_SOURCE_DIR FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP FETCHCONTENT_SOURCE_DIR_FLATBUFFERS)
+# A staged (installed) LiteRT tree has no CMakeCache.txt: the fixed paths below apply.
+if(EXISTS "${LITERT_BUILD}/CMakeCache.txt")
+  load_cache("${LITERT_BUILD}" READ_WITH_PREFIX _litert_
+    TENSORFLOW_SOURCE_DIR FETCHCONTENT_SOURCE_DIR_ABSEIL-CPP FETCHCONTENT_SOURCE_DIR_FLATBUFFERS)
+endif()
 set(_litert_tf "${LITERT_BUILD}/tflite_build/tensorflow-src")
 set(_litert_absl "${LITERT_BUILD}/abseil-cpp")
 set(_litert_fb "${LITERT_BUILD}/flatbuffers")
@@ -101,8 +102,26 @@ endif()
 if(_litert_FETCHCONTENT_SOURCE_DIR_FLATBUFFERS)
   set(_litert_fb "${_litert_FETCHCONTENT_SOURCE_DIR_FLATBUFFERS}")
 endif()
-list(LENGTH _litert_archives _n)
-message(STATUS "tflite-server: linking ${_n} LiteRT archives from ${LITERT_BUILD}")
+# LiteRT: either every static archive of the build tree except its CLI tools and
+# test/bench harnesses, linked as one group (the dependency order inside LiteRT's
+# tree is long and cyclic, and the linker keeps only the objects actually
+# referenced), or the shared runtime libLiteRt.so the same build tree produces.
+if(TFLITE_SERVER_LITERT_SHARED)
+  find_library(_litert_shared NAMES LiteRt PATHS "${LITERT_BUILD}/c" NO_DEFAULT_PATH)
+  if(NOT _litert_shared)
+    message(FATAL_ERROR "TFLITE_SERVER_LITERT_SHARED: no libLiteRt.so under ${LITERT_BUILD}/c")
+  endif()
+  set(_litert_link "${_litert_shared}")
+  message(STATUS "tflite-server: linking the shared LiteRT runtime ${_litert_shared}")
+else()
+  file(GLOB_RECURSE _litert_archives "${LITERT_BUILD}/*.a")
+  list(FILTER _litert_archives EXCLUDE REGEX "/(tools|gtest|gmock|googletest|benchmark)[^/]*/")
+  list(FILTER _litert_archives EXCLUDE REGEX "(gtest|gmock|benchmark)[^/]*\\.a$")
+  list(FILTER _litert_archives EXCLUDE REGEX "/testdata/|-src/")
+  list(LENGTH _litert_archives _n)
+  set(_litert_link -Wl,--start-group ${_litert_archives} -Wl,--end-group)
+  message(STATUS "tflite-server: linking ${_n} LiteRT archives from ${LITERT_BUILD}")
+endif()
 
 add_executable(tflite-server
   src/main.cpp
@@ -111,6 +130,11 @@ add_executable(tflite-server
   src/text_model.cpp)
 target_compile_definitions(tflite-server PRIVATE TFLITE_SERVER_VERSION="${PROJECT_VERSION}")
 if(TFLITE_SERVER_OPS STREQUAL "all")
+  set(TFLITE_SERVER_OPS "")
+endif()
+if(TFLITE_SERVER_OPS AND TFLITE_SERVER_LITERT_SHARED)
+  message(STATUS "tflite-server: op selection applies to the static link only; "
+    "the shared runtime registers every builtin op")
   set(TFLITE_SERVER_OPS "")
 endif()
 if(TFLITE_SERVER_OPS)
@@ -141,9 +165,13 @@ target_include_directories(tflite-server PRIVATE
 target_link_libraries(tflite-server PRIVATE
   tflite_image
   httplib::httplib nlohmann_json::nlohmann_json
-  -Wl,--start-group ${_litert_archives} -Wl,--end-group
+  ${_litert_link}
   "${TOKENIZERS_C_LIB}"
   ${CMAKE_DL_LIBS} Threads::Threads m)
+# The shared runtime is found at run time from the image's library path; no build-tree RPATH ships.
+if(TFLITE_SERVER_LITERT_SHARED)
+  set_target_properties(tflite-server PROPERTIES SKIP_BUILD_RPATH ON)
+endif()
 
 if(TFLITE_SERVER_BUILD_TFLITE_RUN)
   add_executable(tflite-run tools/tflite-run/tflite_run.cpp src/litert_engine.cpp)
@@ -160,6 +188,9 @@ if(TFLITE_SERVER_BUILD_TFLITE_RUN)
   get_target_property(_incs tflite-server INCLUDE_DIRECTORIES)
   target_include_directories(tflite-run PRIVATE src ${_incs})
   target_link_libraries(tflite-run PRIVATE
-    -Wl,--start-group ${_litert_archives} -Wl,--end-group
+    ${_litert_link}
     ${CMAKE_DL_LIBS} Threads::Threads m)
+  if(TFLITE_SERVER_LITERT_SHARED)
+    set_target_properties(tflite-run PROPERTIES SKIP_BUILD_RPATH ON)
+  endif()
 endif()

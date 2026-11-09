@@ -1,5 +1,7 @@
 #pragma once
 
+#include "litert_engine.h"
+
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
@@ -11,7 +13,7 @@
 class TextModel {
 public:
     TextModel(const std::filesystem::path& dir, int threads, const std::string& weight_cache,
-              bool verbose);
+              bool verbose, const AcceleratorConfig& accel = {});
     ~TextModel();
     TextModel(const TextModel&) = delete;
     TextModel& operator=(const TextModel&) = delete;
@@ -19,6 +21,8 @@ public:
     nlohmann::json classify(const std::string& text, int top_k);
     // "text-classification" or "token-classification".
     const std::string& task() const;
+    // "cpu" or "npu": what the model compiled for after any fallback.
+    const std::string& accelerator() const;
 
 private:
     struct Impl;
